@@ -1,0 +1,44 @@
+name: release
+
+# Attach ttp and its checksum to a release, with a build attestation that
+# lets users check the file came from this workflow.  Runs when a release
+# is published, or by hand for an existing release's tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of the release to attach the files to, such as v1.0.0
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # upload files to the release
+      id-token: write     # sign the attestation
+      attestations: write # store the attestation
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Run tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y oathtool
+          /bin/bash test/run-tests.sh
+      - name: Write checksum
+        run: sha256sum ttp > SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ttp
+      - name: Attach files to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" ttp SHA256SUMS --clobber
