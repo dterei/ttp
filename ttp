@@ -41,7 +41,13 @@ keydir="${XDG_CONFIG_HOME-${HOME}/.config}/ttp"
 gpgcmd="gpg"
 # Where gk reads answers from; the tests point it at a file.
 ttydev=/dev/tty
-gpgoptions=(--pinentry-mode loopback -q --no-mdc-warning)
+gpgoptions=(--pinentry-mode loopback -q)
+# Encrypt keys with AES-256, and derive the key from the passphrase with
+# SHA-512 iterated as many times as gpg allows, so a stolen key file is
+# as slow as possible to attack.  Recent gpg does this by default, but
+# older versions use AES-128 or fewer iterations.
+gpgencrypt=(--cipher-algo AES256 --s2k-cipher-algo AES256
+            --s2k-digest-algo SHA512 --s2k-mode 3 --s2k-count 65011712)
 
 usage() {
     echo "usage: $prog [-x] service     # get token for service" >&2
@@ -466,6 +472,9 @@ need_key() {
 main() {
     local mode target code key secret f
 
+    # Never write a core dump, which could hold a key.
+    ulimit -c 0 2> /dev/null
+
     if [[ "$OSTYPE" == "darwin"* ]]; then
         export DISPLAY="<OSX>"
     fi
@@ -560,7 +569,8 @@ main() {
             fi
             printf '%s\n' "$key" | totp 0 > /dev/null || exit 1
             printf '%s\n' "$key" \
-                | "$gpgcmd" "${gpgoptions[@]}" -c -o "$keydir/$target.gpg" || exit 1
+                | "$gpgcmd" "${gpgoptions[@]}" "${gpgencrypt[@]}" -c \
+                    -o "$keydir/$target.gpg" || exit 1
             ;;
         -v|-xv)
             need_key "$target"
