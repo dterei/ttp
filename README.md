@@ -61,6 +61,7 @@ implemented in bash itself.
 * `ttp -[x]c` _service_ - record seed for new _service_
 * `ttp -[x]v` _service_ - view qrcode for _service_
 * `ttp -[x]r` _service_ - re-encrypt _service_'s key with current settings
+* `ttp -[x]R` - re-encrypt all keys with current settings and one new passphrase
 * `ttp -l` - list services setup
 
 Codes are copied to the clipboard you paste from with Ctrl-V (or
@@ -76,6 +77,15 @@ a code, warn about these. `ttp -r` _service_ re-encrypts one with the
 current settings. It asks for the current passphrase, then a new one,
 which can be the same, and only replaces the key file once the new one
 is written.
+
+`ttp -R` re-encrypts every key at once, and is also how to change your
+passphrase, or give all your keys the same one. It asks for your current
+passphrase and a new one (which can be the same), then tries each key
+with every passphrase that has worked so far. It only asks about a key
+that none of them open, so you type each old passphrase once; leave the
+answer empty to skip that key. Keys that are skipped, or can't be
+re-encrypted, are left as they were and listed at the end, and running
+`ttp -R` again is safe.
 
 Service names are used as file names, so they can't contain `/` or
 start with `-` or `.`.

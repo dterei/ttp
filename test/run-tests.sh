@@ -431,7 +431,7 @@ printf '%s\n' "$key" | "$real_gpg" --batch --pinentry-mode loopback \
 "$BASH" "$ttp" -l > "$tmp/stdout" 2> "$tmp/stderr"
 check "-l with old keys: names on stdout" "demo"$'\n'"oldcount"$'\n'"oldhash"$'\n'"oldkey" "$(cat "$tmp/stdout")"
 check "-l with old keys: names them on stderr" \
-    "ttp: these keys use older encryption; upgrade each with 'ttp -r service': oldcount, oldhash, oldkey" \
+    "ttp: these keys use older encryption; upgrade them all with 'ttp -R', or each with 'ttp -r service': oldcount, oldhash, oldkey" \
     "$(cat "$tmp/stderr")"
 rm -f "$tmp/config/ttp/oldhash.gpg" "$tmp/config/ttp/oldcount.gpg"
 
@@ -494,6 +494,135 @@ check "-xr unknown service: exit status" 1 "$rc"
 check_contains "-xr unknown service: message" "no key for nosuch" "$out"
 rm -f "$tmp/config/ttp/oldkey.gpg"
 
+# -R takes the passphrases itself and hands them to gpg, so these tests
+# use gpg without the fixed-passphrase wrapper.  ttp's functions were
+# sourced above; main runs in a subshell, as it exits.  This gpg logs its
+# arguments, and while $tmp/noenc exists, it fails after encrypting.
+mkdir -p "$tmp/rkeys" "$tmp/countbin"
+cat > "$tmp/countbin/gpg" <<EOF
+#!/bin/sh
+echo "\$*" >> "$tmp/gpg-args"
+case " \$* " in
+    *" -c "*) test -e "$tmp/noenc" && { "$real_gpg" "\$@"; exit 2; } ;;
+esac
+exec "$real_gpg" "\$@"
+EOF
+chmod +x "$tmp/countbin/gpg"
+
+# rekey ANSWERS...: run ttp -xR on the keys in $tmp/rkeys, typing
+# ANSWERS at its prompts; sets $out, $rc and $decrypts, the number of
+# times it ran gpg to decrypt.
+rekey() {
+    printf '%s\n' "$@" > "$tmp/answers"
+    : > "$tmp/gpg-args"
+    out=$(keydir=$tmp/rkeys ttydev=$tmp/answers gpgcmd=$tmp/countbin/gpg main -xR 2>&1)
+    rc=$?
+    decrypts=$(grep -c ' -d ' "$tmp/gpg-args")
+}
+
+# rkey NAME PASSPHRASE [KEY]: save KEY (by default $key) as NAME,
+# encrypted with PASSPHRASE and the weak test defaults.
+rkey() {
+    printf '%s\n' "${3-$key}" | "$real_gpg" --batch --pinentry-mode loopback -q \
+        --passphrase-fd 4 -c -o "$tmp/rkeys/$1.gpg" 4< <(printf '%s\n' "$2")
+}
+
+# opens NAME PASSPHRASE: print NAME's key if PASSPHRASE opens it.
+opens() {
+    printf '%s\n' "$2" | "$real_gpg" --batch --pinentry-mode loopback -q \
+        --passphrase-fd 0 -d "$tmp/rkeys/$1.gpg" 2> /dev/null
+}
+
+# unchanged NAMES...: say whether each key matches its backup.
+unchanged() {
+    local name result=
+    for name in "$@"; do
+        if cmp -s "$tmp/rbackup/$name.gpg" "$tmp/rkeys/$name.gpg"; then
+            result+=" same"
+        else
+            result+=" changed"
+        fi
+    done
+    echo "${result# }"
+}
+
+# temp_files: list -R's temporary files left in $tmp/rkeys.
+temp_files() {
+    local f
+    for f in "$tmp/rkeys"/.*.new; do
+        test -e "$f" && echo "${f##*/}"
+    done
+}
+
+rekey pass-a pass-new pass-new
+check "-xR with no keys: exit status" 1 "$rc"
+check_contains "-xR with no keys: message" "there are no keys to re-encrypt" "$out"
+
+# k1 uses one passphrase, k2-k4 another, and k5 a third, which the tests
+# don't type.  k6 opens with the first, but isn't a valid key.
+rkey k1 pass-a
+rkey k2 pass-b
+rkey k3 pass-b
+rkey k4 pass-b
+rkey k5 pass-c
+rkey k6 pass-a 'NOT!VALID'
+cp -R "$tmp/rkeys" "$tmp/rbackup"
+same6="same same same same same same"
+
+rekey pass-a pass-new1 pass-new2
+check "-xR, new passphrases differ: exit status" 1 "$rc"
+check_contains "-xR, new passphrases differ: message" "the new passphrases don't match" "$out"
+check "-xR, new passphrases differ: keys unchanged" "$same6" "$(unchanged k1 k2 k3 k4 k5 k6)"
+check "-xR, new passphrases differ: nothing decrypted" 0 "$decrypts"
+
+rekey pass-a "" ""
+check "-xR, empty new passphrase: exit status" 1 "$rc"
+check_contains "-xR, empty new passphrase: message" "the new passphrase can't be empty" "$out"
+check "-xR, empty new passphrase: keys unchanged" "$same6" "$(unchanged k1 k2 k3 k4 k5 k6)"
+
+touch "$tmp/noenc"
+rekey pass-a pass-new pass-new pass-b ""
+rm -f "$tmp/noenc"
+check "-xR, gpg fails to encrypt: exit status" 1 "$rc"
+check_contains "-xR, gpg fails to encrypt: message" "couldn't re-encrypt k1's key" "$out"
+check "-xR, gpg fails to encrypt: keys unchanged" "$same6" "$(unchanged k1 k2 k3 k4 k5 k6)"
+check "-xR, gpg fails to encrypt: no temporary files" "" "$(temp_files)"
+
+rekey pass-a pass-new pass-new pass-wrong pass-b ""
+check "-xR: exit status, as some keys were skipped" 1 "$rc"
+check_contains "-xR: summary" "Re-encrypted 4 of 6 keys." "$out"
+check_contains "-xR: a wrong passphrase is reported" "that passphrase doesn't open k2's key either" "$out"
+check_contains "-xR: an invalid key is reported" "k6's key isn't a valid key" "$out"
+check_contains "-xR: skipped keys are named" "these keys were left as they were: k5, k6" "$out"
+# Asked about k2 twice (once wrongly) and k5 once; k3 and k4 open with
+# the passphrase k2 needed.
+check "-xR: asks only about keys no passphrase so far opens" 3 \
+    "$(printf '%s\n' "$out" | grep -c 'Passphrase for k[25] ')"
+# k1 1, k2 4 (pass-a, pass-new, pass-wrong, pass-b), k3 1 and k4 1 (pass-b first),
+# k5 3, k6 2.
+check "-xR: tries the passphrase that last worked first" 12 "$decrypts"
+for name in k1 k2 k3 k4; do
+    check "-xR: the new passphrase opens $name" "$key" "$(opens $name pass-new)"
+done
+check "-xR: skipped keys unchanged" "same same" "$(unchanged k5 k6)"
+packets=$("$real_gpg" --batch --pinentry-mode cancel --list-packets "$tmp/rkeys/k2.gpg" 2>&1)
+check_contains "-xR: now AES-256" "cipher 9," "$packets"
+check_contains "-xR: now SHA-512" "hash 10" "$packets"
+check_contains "-xR: now the most iterations" "count 65011712" "$packets"
+# shellcheck disable=SC2012
+check "-xR: key files are private" "-rw-------" "$(ls -l "$tmp/rkeys/k3.gpg" | cut -c1-10)"
+check "-xR: no temporary files" "" "$(temp_files)"
+check "-xR: passphrases never on gpg's command line" no \
+    "$(grep -q 'pass-' "$tmp/gpg-args" && echo yes || echo no)"
+
+# Running again, as after an interrupted run: keys already using the new
+# passphrase open with it, without asking.
+rekey pass-c pass-new pass-new ""
+check "-xR again: summary" "Re-encrypted 5 of 6 keys." "$(printf '%s\n' "$out" | grep Re-encrypted)"
+check "-xR again: asks only about k6" "k6" \
+    "$(printf '%s\n' "$out" | sed -n 's/.*Passphrase for \([^ ]*\) .*/\1/p')"
+check "-xR again: k5 now opens with the new passphrase" "$key" "$(opens k5 pass-new)"
+
 run -l
 check "-l: lists keys" demo "$out"
 
@@ -517,7 +646,7 @@ check_contains "-x unknown service: message" "no key for nosuch" "$out"
 run -xv nosuch
 check "-xv unknown service: exit status" 1 "$rc"
 
-for args in "" "-c" "-x" "a b c"; do
+for args in "" "-c" "-x" "a b c" "-l x" "-R x" "-xR x"; do
     run $args
     check "usage for '$args': exit status" 1 "$rc"
     check_contains "usage for '$args': message" "usage:" "$out"
