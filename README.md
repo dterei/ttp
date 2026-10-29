@@ -26,7 +26,8 @@ was built from this repository by its release workflow and not changed
 since. Skip that step if you don't have `gh`.
 
 `ttp` is a self-contained bash script; the TOTP code calculation
-(base32 decoding and HMAC-SHA1) is implemented in bash itself.
+(base32 decoding, and HMAC with SHA-1, SHA-256 or SHA-512) is
+implemented in bash itself.
 
 ### Required dependencies
 
@@ -70,9 +71,8 @@ Service names are used as file names, so they can't contain `/` or
 start with `-` or `.`.
 
 A key can be a base32 secret or an `otpauth://totp/` URI, such as the
-ones in QR codes. URIs may set `digits` (1 to 10) and `period`; `ttp`
-only supports the default SHA1 algorithm, and reports an error for any
-other.
+ones in QR codes. URIs may set `digits` (1 to 10), `period`, and
+`algorithm`: `SHA1` (the default), `SHA256` or `SHA512`.
 
 ### Importing from Google Authenticator
 
@@ -83,8 +83,8 @@ _service_ with the QR code on screen (this needs X11 and `zbarimg`),
 and answer `y` when `ttp` asks about that account. If you have the
 code's `otpauth-migration://` URI instead, paste it at the key prompt.
 
-Counter-based (HOTP) accounts are skipped, and accounts using an
-algorithm other than SHA1 are rejected.
+Counter-based (HOTP) accounts are skipped, and accounts using MD5 are
+rejected.
 
 ## OS X and GPG Tools
 

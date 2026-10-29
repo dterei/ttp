@@ -9,7 +9,7 @@
 # a temporary directory is touched; gpg runs with its own GNUPGHOME and a
 # fixed passphrase.
 
-# The tests share globals such as sha1_in and sha1_out with ttp.
+# The tests share globals such as hash_in and hash_out with ttp.
 # shellcheck disable=SC2034,SC2154
 
 export LC_ALL=C
@@ -83,72 +83,137 @@ trap cleanup EXIT
 source "$ttp"
 
 echo "Testing sha1"
-sha1_in=()
+hash_in=()
 sha1
-check "sha1 of empty string" da39a3ee5e6b4b0d3255bfef95601890afd80709 "$(hex "${sha1_out[@]}")"
+check "sha1 of empty string" da39a3ee5e6b4b0d3255bfef95601890afd80709 "$(hex "${hash_out[@]}")"
 to_bytes abc
-sha1_in=("${bytes[@]}")
+hash_in=("${bytes[@]}")
 sha1
-check "sha1 of abc" a9993e364706816aba3e25717850c26c9cd0d89d "$(hex "${sha1_out[@]}")"
+check "sha1 of abc" a9993e364706816aba3e25717850c26c9cd0d89d "$(hex "${hash_out[@]}")"
 to_bytes abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq
-sha1_in=("${bytes[@]}")
+hash_in=("${bytes[@]}")
 sha1
-check "sha1 of 56-byte string" 84983e441c3bd26ebaae4aa1f95129e5e54670f1 "$(hex "${sha1_out[@]}")"
+check "sha1 of 56-byte string" 84983e441c3bd26ebaae4aa1f95129e5e54670f1 "$(hex "${hash_out[@]}")"
 
-# Compare against the system's sha1 tool across the padding boundaries.
-if command -v sha1sum > /dev/null; then
-    sha1tool=sha1sum
-elif command -v shasum > /dev/null; then
-    sha1tool=shasum
-else
-    sha1tool=
-fi
-if test -n "$sha1tool"; then
-    for len in 1 54 55 56 57 63 64 65 119 120 128 200; do
-        sha1_in=()
+echo "Testing sha256 and sha512"
+hash_in=()
+sha256
+check "sha256 of empty string" e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 "$(hex "${hash_out[@]}")"
+sha512
+check "sha512 of empty string" cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e "$(hex "${hash_out[@]}")"
+to_bytes abc
+hash_in=("${bytes[@]}")
+sha256
+check "sha256 of abc" ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad "$(hex "${hash_out[@]}")"
+sha512
+check "sha512 of abc" ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f "$(hex "${hash_out[@]}")"
+to_bytes abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq
+hash_in=("${bytes[@]}")
+sha256
+check "sha256 of 56-byte string" 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1 "$(hex "${hash_out[@]}")"
+
+# Compare against the system's hash tools across the padding boundaries
+# of both 64-byte (SHA-1, SHA-256) and 128-byte (SHA-512) blocks.
+for bits in 1 256 512; do
+    if command -v "sha${bits}sum" > /dev/null; then
+        tool=("sha${bits}sum")
+    elif command -v shasum > /dev/null; then
+        tool=(shasum -a "$bits")
+    else
+        echo "  (no sha${bits}sum or shasum found; skipping comparison)"
+        continue
+    fi
+    for len in 1 54 55 56 57 63 64 65 111 112 113 119 120 127 128 129 200 240; do
+        hash_in=()
         escapes=
         for ((i = 0; i < len; i++)); do
-            sha1_in+=($(( (i * 37 + len) & 255 )))
+            hash_in+=($(( (i * 37 + len) & 255 )))
             escapes+=$(printf '\\%03o' $(( (i * 37 + len) & 255 )))
         done
         # shellcheck disable=SC2059
         printf "$escapes" > "$tmp/blob"
-        sha1
-        want=$($sha1tool < "$tmp/blob")
-        check "sha1 of $len bytes matches $sha1tool" "${want%% *}" "$(hex "${sha1_out[@]}")"
+        "sha$bits"
+        want=$("${tool[@]}" < "$tmp/blob")
+        check "sha$bits of $len bytes matches ${tool[*]}" "${want%% *}" "$(hex "${hash_out[@]}")"
     done
-else
-    echo "  (no sha1sum or shasum found; skipping comparison)"
-fi
+done
 
-echo "Testing hmac_sha1 (RFC 2202 test cases)"
+echo "Testing hmac sha1 (RFC 2202 test cases)"
 repeat_byte 11 20
 hmac_key=("${bytes[@]}")
 to_bytes "Hi There"
 hmac_msg=("${bytes[@]}")
-hmac_sha1
-check "RFC 2202 case 1" b617318655057264e28bc0b6fb378c8ef146be00 "$(hex "${sha1_out[@]}")"
+hmac sha1
+check "RFC 2202 case 1" b617318655057264e28bc0b6fb378c8ef146be00 "$(hex "${hash_out[@]}")"
 
 to_bytes Jefe
 hmac_key=("${bytes[@]}")
 to_bytes "what do ya want for nothing?"
 hmac_msg=("${bytes[@]}")
-hmac_sha1
-check "RFC 2202 case 2" effcdf6ae5eb2fa2d27416d5f184df9c259a7c79 "$(hex "${sha1_out[@]}")"
+hmac sha1
+check "RFC 2202 case 2" effcdf6ae5eb2fa2d27416d5f184df9c259a7c79 "$(hex "${hash_out[@]}")"
 
 repeat_byte 170 20
 hmac_key=("${bytes[@]}")
 repeat_byte 221 50
 hmac_msg=("${bytes[@]}")
-hmac_sha1
-check "RFC 2202 case 3" 125d7342b9ac11cd91a39af48aa17b4f63f175d3 "$(hex "${sha1_out[@]}")"
+hmac sha1
+check "RFC 2202 case 3" 125d7342b9ac11cd91a39af48aa17b4f63f175d3 "$(hex "${hash_out[@]}")"
 
 repeat_byte 170 80
 hmac_key=("${bytes[@]}")
 to_bytes "Test Using Larger Than Block-Size Key - Hash Key First"
 hmac_msg=("${bytes[@]}")
-hmac_sha1
-check "RFC 2202 case 6 (key longer than a block)" aa4ae5e15272d00e95705637ce8a3b55ed402112 "$(hex "${sha1_out[@]}")"
+hmac sha1
+check "RFC 2202 case 6 (key longer than a block)" aa4ae5e15272d00e95705637ce8a3b55ed402112 "$(hex "${hash_out[@]}")"
+
+echo "Testing hmac sha256 and sha512 (RFC 4231 test cases)"
+for alg in sha256 sha512; do
+    repeat_byte 11 20
+    hmac_key=("${bytes[@]}")
+    to_bytes "Hi There"
+    hmac_msg=("${bytes[@]}")
+    hmac "$alg"
+    case $alg in
+        sha256) want=b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7 ;;
+        sha512) want=87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854 ;;
+    esac
+    check "RFC 4231 case 1 ($alg)" "$want" "$(hex "${hash_out[@]}")"
+
+    to_bytes Jefe
+    hmac_key=("${bytes[@]}")
+    to_bytes "what do ya want for nothing?"
+    hmac_msg=("${bytes[@]}")
+    hmac "$alg"
+    case $alg in
+        sha256) want=5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843 ;;
+        sha512) want=164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737 ;;
+    esac
+    check "RFC 4231 case 2 ($alg)" "$want" "$(hex "${hash_out[@]}")"
+
+    repeat_byte 170 20
+    hmac_key=("${bytes[@]}")
+    repeat_byte 221 50
+    hmac_msg=("${bytes[@]}")
+    hmac "$alg"
+    case $alg in
+        sha256) want=773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe ;;
+        sha512) want=fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb ;;
+    esac
+    check "RFC 4231 case 3 ($alg)" "$want" "$(hex "${hash_out[@]}")"
+
+    # A key longer than even SHA-512's 128-byte block.
+    repeat_byte 170 131
+    hmac_key=("${bytes[@]}")
+    to_bytes "Test Using Larger Than Block-Size Key - Hash Key First"
+    hmac_msg=("${bytes[@]}")
+    hmac "$alg"
+    case $alg in
+        sha256) want=60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54 ;;
+        sha512) want=80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598 ;;
+    esac
+    check "RFC 4231 case 6 ($alg, key longer than a block)" "$want" "$(hex "${hash_out[@]}")"
+done
 
 echo "Testing totp"
 # The RFC 4226 and RFC 6238 test key, "12345678901234567890", in base32.
@@ -160,6 +225,21 @@ for vector in 59:94287082 1111111109:07081804 1111111111:14050471 \
     time=${vector%%:*}
     check "RFC 6238 at time $time" "${vector#*:}" \
         "$(echo "otpauth://totp/test?secret=$key&digits=8" | totp "$time")"
+done
+
+# RFC 6238 appendix B with SHA-256 and SHA-512, whose test keys are the
+# same digits repeated to 32 and 64 bytes.
+key256=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA
+key512=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA
+for vector in 59:46119246 1111111109:68084774 1111111111:67062674 1234567890:91819424 2000000000:90698825 20000000000:77737706; do
+    time=${vector%%:*}
+    check "RFC 6238 SHA256 at time $time" "${vector#*:}" \
+        "$(echo "otpauth://totp/test?secret=$key256&digits=8&algorithm=SHA256" | totp "$time")"
+done
+for vector in 59:90693936 1111111109:25091201 1111111111:99943326 1234567890:93441116 2000000000:38618901 20000000000:47863826; do
+    time=${vector%%:*}
+    check "RFC 6238 SHA512 at time $time" "${vector#*:}" \
+        "$(echo "otpauth://totp/test?secret=$key512&digits=8&algorithm=SHA512" | totp "$time")"
 done
 
 # RFC 4226 appendix D (6 digits); counter c is time c * 30.
@@ -192,7 +272,7 @@ expect_error "invalid length" "bad key" $'A\n'
 expect_error "URI without secret" "bad key" $'otpauth://totp/a?issuer=a\n'
 expect_error "URI without query" "bad key" $'otpauth://totp/a\n'
 expect_error "HOTP URI" "bad key" "otpauth://hotp/a?secret=$key&counter=1"$'\n'
-expect_error "SHA256 URI" "unsupported algorithm" "otpauth://totp/a?secret=$key&algorithm=SHA256"$'\n'
+expect_error "MD5 URI" "unsupported algorithm" "otpauth://totp/a?secret=$key&algorithm=MD5"$'\n'
 expect_error "zero digits" "unsupported number of digits" "otpauth://totp/a?secret=$key&digits=0"$'\n'
 expect_error "11 digits" "unsupported number of digits" "otpauth://totp/a?secret=$key&digits=11"$'\n'
 expect_error "zero period" "unsupported period" "otpauth://totp/a?secret=$key&period=0"$'\n'
@@ -259,8 +339,7 @@ check "export with mixed keys" \
 otpauth://totp/Example:carol?secret=IV4GC3LQNRSTU6A&issuer=Example
 otpauth://totp/Zo%C3%AB%20%26%20co?secret=AD7RA" "$out"
 check_contains "export with an HOTP key: skipped" "skipping counter: counter-based (HOTP)" "$(cat "$tmp/stderr")"
-check "SHA256 key from an export is rejected" 1 \
-    "$(printf '%s\n' "$out" | sed -n 1p | totp 30 > /dev/null 2>&1; echo $?)"
+check "SHA256 key from an export" 848978 "$(printf '%s\n' "$out" | sed -n 1p | totp 30)"
 check "8-digit key from an export" 8 "$(echo "$uri_bob" | totp 30 | tr -d '\n' | wc -c | tr -d ' ')"
 
 # expect_bad_export NAME URI
@@ -608,9 +687,14 @@ if command -v oathtool > /dev/null; then
             1) digits=8 period=30 ;;
             2) digits=6 period=60 ;;
         esac
-        want=$(oathtool --totp -b -d "$digits" -s "${period}s" -N "@$time" "$secret")
-        got=$(echo "otpauth://totp/x?secret=$secret&digits=$digits&period=$period" | totp "$time")
-        check "oathtool: $secret, digits=$digits, period=$period, time=$time" "$want" "$got"
+        case $(( n % 4 )) in
+            0|1) algorithm=SHA1 ;;
+            2) algorithm=SHA256 ;;
+            3) algorithm=SHA512 ;;
+        esac
+        want=$(oathtool --totp="$algorithm" -b -d "$digits" -s "${period}s" -N "@$time" "$secret")
+        got=$(echo "otpauth://totp/x?secret=$secret&digits=$digits&period=$period&algorithm=$algorithm" | totp "$time")
+        check "oathtool: $secret, $algorithm, digits=$digits, period=$period, time=$time" "$want" "$got"
     done
 else
     echo "  (oathtool not found; skipping comparison)"
