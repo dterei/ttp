@@ -9,9 +9,21 @@ Google Authenticator (a.k.a. RFC6238 TOTP) from the shell.
 
 ## Installing
 
-Just download and install
-[`ttp`](https://raw.githubusercontent.com/dterei/ttp/master/ttp)
-somewhere on your path (e.g., `$HOME/bin/ttp`).
+Download `ttp` and its checksum from the
+[latest release](https://github.com/dterei/ttp/releases/latest), check
+them, and install `ttp` somewhere on your path (e.g., `$HOME/bin`):
+
+    curl -fsSLO https://github.com/dterei/ttp/releases/latest/download/ttp
+    curl -fsSLO https://github.com/dterei/ttp/releases/latest/download/SHA256SUMS
+    sha256sum -c SHA256SUMS       # on macOS: shasum -a 256 -c SHA256SUMS
+    gh attestation verify ttp --repo dterei/ttp
+    chmod +x ttp && mv ttp ~/bin/
+
+The checksum catches a damaged download. The
+[build attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations),
+checked with the [GitHub CLI](https://cli.github.com/), proves the file
+was built from this repository by its release workflow and not changed
+since. Skip that step if you don't have `gh`.
 
 `ttp` is a self-contained bash script; the TOTP code calculation
 (base32 decoding and HMAC-SHA1) is implemented in bash itself.

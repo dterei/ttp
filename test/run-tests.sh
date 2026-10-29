@@ -287,6 +287,16 @@ echo "Testing the ttp command"
 real_gpg=$(command -v gpg) || { echo "gpg is required"; exit 1; }
 mkdir -p "$tmp/bin" "$tmp/failbin" "$tmp/gnupg" "$tmp/config"
 chmod 700 "$tmp/gnupg"
+# Weak defaults, so the tests show that ttp asks for strong encryption
+# itself rather than relying on gpg's defaults.
+cat > "$tmp/gnupg/gpg.conf" <<'EOF'
+cipher-algo AES128
+s2k-cipher-algo AES128
+s2k-digest-algo SHA1
+s2k-count 1024
+EOF
+# gpg takes the default iteration count from gpg-agent.
+echo "s2k-count 1024" > "$tmp/gnupg/gpg-agent.conf"
 cat > "$tmp/bin/gpg" <<EOF
 #!/bin/sh
 exec "$real_gpg" --batch --passphrase test-passphrase "\$@"
@@ -316,6 +326,17 @@ check "-xc: key file created" yes "$(test -f "$tmp/config/ttp/demo.gpg" && echo 
 # ls is the portable way to read permissions; stat differs across systems.
 # shellcheck disable=SC2012
 check "-xc: key file is private" "-rw-------" "$(ls -l "$tmp/config/ttp/demo.gpg" | cut -c1-10)"
+packets=$("$real_gpg" --batch --pinentry-mode loopback --passphrase test-passphrase \
+    --list-packets "$tmp/config/ttp/demo.gpg" 2>&1)
+check_contains "-xc: key encrypted with AES-256" "cipher 9," "$packets"
+check_contains "-xc: passphrase hashed with SHA-512" "hash 10" "$packets"
+check_contains "-xc: passphrase hashed the most times gpg allows" "count 65011712" "$packets"
+
+# main lowers the core dump limit, if the system lets the test raise it.
+if ulimit -c unlimited 2> /dev/null; then
+    check "core dumps disabled" 0 \
+        "$(ulimit -c unlimited; keydir=$tmp/config/ttp main -l > /dev/null; ulimit -c)"
+fi
 
 run -l
 check "-l: lists keys" demo "$out"
