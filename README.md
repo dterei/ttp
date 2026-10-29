@@ -36,9 +36,10 @@ implemented in bash itself.
 | bash | Running `ttp`. |
 | [GnuPG](https://gnupg.org/) (`gpg`) | Encrypting the stored keys with a passphrase. |
 | `mkdir` | Creating the key directory. |
+| `mv` | Replacing a key file when re-encrypting it. |
 | `date` | Reading the current time, on bash older than 5.0 only. |
 
-`mkdir` and `date` come with every Linux distribution and macOS.
+`mkdir`, `mv` and `date` come with every Linux distribution and macOS.
 
 ### Optional dependencies
 
@@ -59,6 +60,7 @@ implemented in bash itself.
 * `ttp [-x]` _service_ - get token for _service_
 * `ttp -[x]c` _service_ - record seed for new _service_
 * `ttp -[x]v` _service_ - view qrcode for _service_
+* `ttp -[x]r` _service_ - re-encrypt _service_'s key with current settings
 * `ttp -l` - list services setup
 
 Codes are copied to the clipboard you paste from with Ctrl-V (or
@@ -66,6 +68,14 @@ Cmd-V on macOS) when a clipboard tool is available. The `-x`, `-xc`, and
 `-xv` flags disable use of X11 and Wayland even when they are available,
 compared to no option, `-c`, and `-v`: codes are printed, keys are typed
 in, and QR codes are drawn in the terminal.
+
+Keys are encrypted with AES-256, and your passphrase is hashed with
+SHA-512 as many times as gpg allows. Keys saved by older versions of
+`ttp`, or with older gpg, may use weaker settings: `ttp -l`, and getting
+a code, warn about these. `ttp -r` _service_ re-encrypts one with the
+current settings. It asks for the current passphrase, then a new one,
+which can be the same, and only replaces the key file once the new one
+is written.
 
 Service names are used as file names, so they can't contain `/` or
 start with `-` or `.`.

@@ -19,7 +19,7 @@
 #   Just put it somewhere on your path (e.g., $HOME/bin/ttp).
 #
 # Requirements:
-#   bash, gnupg (plus mkdir, and date on bash < 5)
+#   bash, gnupg (plus mkdir, mv, and date on bash < 5)
 #
 # Optional dependencies (see README.md for details):
 #   wl-copy - to send login codes to the Wayland clipboard instead of stdout
@@ -53,6 +53,7 @@ usage() {
     echo "usage: $prog [-x] service     # get token for service" >&2
     echo "       $prog -[x]c service    # record seed for new service" >&2
     echo "       $prog -[x]v service    # view qrcode for service" >&2
+    echo "       $prog -[x]r service    # re-encrypt service's key with current settings" >&2
     echo "       $prog -l               # list services setup" >&2
     echo "(The -x* flags disable use of X11 and Wayland even when they are available.)" >&2
     exit 1
@@ -594,6 +595,21 @@ gk() {
     done 3< "$ttydev"
 }
 
+# Succeed if key file $1 is passphrase-encrypted with weaker settings
+# than gpgencrypt asks for.  gpg shows the settings without decrypting.
+key_is_old() {
+    local packets
+    packets=$("$gpgcmd" --batch --pinentry-mode cancel --list-packets "$1" 2> /dev/null < /dev/null)
+    case "$packets" in
+        *":symkey enc packet:"*) ;;
+        *) return 1 ;;
+    esac
+    case "$packets" in
+        *"cipher 9,"*"hash 10"*"count 65011712"*) return 1 ;;
+    esac
+    return 0
+}
+
 # Exit with an error unless a key is stored for service $1.
 need_key() {
     if ! test -f "$keydir/$1.gpg"; then
@@ -603,7 +619,7 @@ need_key() {
 }
 
 main() {
-    local mode target code key secret f
+    local mode target code key secret f newfile old name
 
     # Never write a core dump, which could hold a key.
     ulimit -c 0 2> /dev/null
@@ -660,6 +676,9 @@ main() {
         "")
             need_key "$target"
             code=$("$gpgcmd" "${gpgoptions[@]}" -d "$keydir/$target.gpg" | totp) || exit 1
+            if key_is_old "$keydir/$target.gpg"; then
+                echo "$prog: $target's key uses older encryption; run '$prog -r $target' to upgrade it" >&2
+            fi
             if test -n "$WAYLAND_DISPLAY" && command -v wl-copy > /dev/null; then
                 echo "Sending code to Wayland clipboard"
                 printf '%s' "$code" | wl-copy
@@ -705,6 +724,29 @@ main() {
                 | "$gpgcmd" "${gpgoptions[@]}" "${gpgencrypt[@]}" -c \
                     -o "$keydir/$target.gpg" || exit 1
             ;;
+        -r|-xr)
+            need_key "$target"
+            umask 077
+            secret=$("$gpgcmd" "${gpgoptions[@]}" -d "$keydir/$target.gpg") || exit 1
+            # Check the key decrypted to something valid before replacing
+            # the file, so a failed decryption can't lose the key.
+            if test -z "$secret"; then
+                echo "$prog: $target's key decrypted to nothing; leaving it as it is" >&2
+                exit 1
+            fi
+            printf '%s\n' "$secret" | totp 0 > /dev/null || exit 1
+            # Write next to the old file, then swap it in, so an
+            # interruption leaves the old key in place.  Names can't
+            # start with ".", so this can't clash with another key.
+            newfile="$keydir/.$target.gpg.new"
+            # shellcheck disable=SC2064
+            trap "rm -f $(printf '%q' "$newfile")" EXIT
+            rm -f "$newfile"
+            printf '%s\n' "$secret" \
+                | "$gpgcmd" "${gpgoptions[@]}" "${gpgencrypt[@]}" -c -o "$newfile" || exit 1
+            mv -f "$newfile" "$keydir/$target.gpg" || exit 1
+            echo "Re-encrypted $target's key."
+            ;;
         -v|-xv)
             need_key "$target"
             secret=$("$gpgcmd" "${gpgoptions[@]}" -d "$keydir/$target.gpg") || exit 1
@@ -729,11 +771,21 @@ main() {
             fi
             ;;
         -l)
+            old=
             for f in "$keydir"/*.gpg; do
                 test -f "$f" || continue
-                f=${f##*/}
-                echo "${f%.gpg}"
+                name=${f##*/}
+                name=${name%.gpg}
+                echo "$name"
+                if key_is_old "$f"; then
+                    old+="${old:+, }$name"
+                fi
             done
+            # Report keys that need upgrading on stderr, so the list of
+            # names on stdout stays easy to use in scripts.
+            if test -n "$old"; then
+                echo "$prog: these keys use older encryption; upgrade each with '$prog -r service': $old" >&2
+            fi
             ;;
         *)
             usage

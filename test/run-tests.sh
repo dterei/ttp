@@ -417,6 +417,83 @@ if ulimit -c unlimited 2> /dev/null; then
         "$(ulimit -c unlimited; keydir=$tmp/config/ttp main -l > /dev/null; ulimit -c)"
 fi
 
+# A key saved with older, weaker settings, made directly with gpg and the
+# weak test defaults rather than through ttp.
+printf '%s\n' "$key" | "$real_gpg" --batch --pinentry-mode loopback \
+    --passphrase test-passphrase -q -c -o "$tmp/config/ttp/oldkey.gpg"
+# Keys that are strong except for one setting each.
+printf '%s\n' "$key" | "$real_gpg" --batch --pinentry-mode loopback \
+    --passphrase test-passphrase -q --cipher-algo AES256 --s2k-digest-algo SHA1 \
+    --s2k-count 65011712 -c -o "$tmp/config/ttp/oldhash.gpg"
+printf '%s\n' "$key" | "$real_gpg" --batch --pinentry-mode loopback \
+    --passphrase test-passphrase -q --cipher-algo AES256 --s2k-digest-algo SHA512 \
+    -c -o "$tmp/config/ttp/oldcount.gpg"
+"$BASH" "$ttp" -l > "$tmp/stdout" 2> "$tmp/stderr"
+check "-l with old keys: names on stdout" "demo"$'\n'"oldcount"$'\n'"oldhash"$'\n'"oldkey" "$(cat "$tmp/stdout")"
+check "-l with old keys: names them on stderr" \
+    "ttp: these keys use older encryption; upgrade each with 'ttp -r service': oldcount, oldhash, oldkey" \
+    "$(cat "$tmp/stderr")"
+rm -f "$tmp/config/ttp/oldhash.gpg" "$tmp/config/ttp/oldcount.gpg"
+
+"$BASH" "$ttp" -x oldkey > "$tmp/stdout" 2> "$tmp/stderr"
+check "-x with an old key: prints a code" 6 "$(tr -d '\n' < "$tmp/stdout" | wc -c | tr -d ' ')"
+check_contains "-x with an old key: suggests -r" "run 'ttp -r oldkey' to upgrade it" "$(cat "$tmp/stderr")"
+"$BASH" "$ttp" -x demo > /dev/null 2> "$tmp/stderr"
+check "-x with a current key: no upgrade hint" no \
+    "$(grep -q 'older encryption' "$tmp/stderr" && echo yes || echo no)"
+
+# -r must leave the old key in place whenever it fails.
+cp "$tmp/config/ttp/oldkey.gpg" "$tmp/oldkey.backup"
+mkdir -p "$tmp/wrongbin" "$tmp/noencbin"
+cat > "$tmp/wrongbin/gpg" <<EOF
+#!/bin/sh
+exec "$real_gpg" --batch --passphrase wrong-passphrase "\$@"
+EOF
+# A gpg that decrypts but fails to encrypt.
+cat > "$tmp/noencbin/gpg" <<EOF
+#!/bin/sh
+case " \$* " in
+    *" -c "*) exit 2 ;;
+esac
+exec "$real_gpg" --batch --passphrase test-passphrase "\$@"
+EOF
+chmod +x "$tmp/wrongbin/gpg" "$tmp/noencbin/gpg"
+for bin in wrongbin noencbin; do
+    out=$(PATH="$tmp/$bin:$PATH" "$BASH" "$ttp" -xr oldkey 2>&1)
+    check "-xr failing ($bin): exit status" 1 "$?"
+    check "-xr failing ($bin): key unchanged" same \
+        "$(cmp -s "$tmp/oldkey.backup" "$tmp/config/ttp/oldkey.gpg" && echo same || echo changed)"
+    check "-xr failing ($bin): no temporary file" no \
+        "$(test -e "$tmp/config/ttp/.oldkey.gpg.new" && echo yes || echo no)"
+done
+
+before=$(echo "$key" | totp)
+run -xr oldkey
+check "-xr: exit status" 0 "$rc"
+check_contains "-xr: message" "Re-encrypted oldkey's key." "$out"
+packets=$("$real_gpg" --batch --pinentry-mode loopback --passphrase test-passphrase \
+    --list-packets "$tmp/config/ttp/oldkey.gpg" 2>&1)
+check_contains "-xr: now AES-256" "cipher 9," "$packets"
+check_contains "-xr: now SHA-512" "hash 10" "$packets"
+check_contains "-xr: now the most iterations" "count 65011712" "$packets"
+# ls is the portable way to read permissions; stat differs across systems.
+# shellcheck disable=SC2012
+check "-xr: key file is private" "-rw-------" "$(ls -l "$tmp/config/ttp/oldkey.gpg" | cut -c1-10)"
+check "-xr: no temporary file" no "$(test -e "$tmp/config/ttp/.oldkey.gpg.new" && echo yes || echo no)"
+"$BASH" "$ttp" -x oldkey > "$tmp/stdout" 2> "$tmp/stderr"
+after=$(echo "$key" | totp)
+code=$(cat "$tmp/stdout")
+check "-xr: same codes as before" yes \
+    "$(test "$code" = "$before" -o "$code" = "$after" && echo yes || echo "no ($code)")"
+check "-xr: no more upgrade hint" "" "$(cat "$tmp/stderr")"
+"$BASH" "$ttp" -l > /dev/null 2> "$tmp/stderr"
+check "-l after -xr: nothing to upgrade" "" "$(cat "$tmp/stderr")"
+
+run -xr nosuch
+check "-xr unknown service: exit status" 1 "$rc"
+check_contains "-xr unknown service: message" "no key for nosuch" "$out"
+rm -f "$tmp/config/ttp/oldkey.gpg"
+
 run -l
 check "-l: lists keys" demo "$out"
 
@@ -459,7 +536,7 @@ out=$(PATH="$tmp/failbin:$PATH" "$BASH" "$ttp" -xc broken <<< "$key" 2>&1)
 check "-xc when gpg fails: exit status" 1 "$?"
 
 for name in ../escape a/b .hidden -dash; do
-    for mode in -xc -x -xv; do
+    for mode in -xc -x -xv -xr; do
         run $mode "$name" <<< "$key"
         check "$mode '$name': exit status" 1 "$rc"
         # With -x, a lone "-dash" argument is rejected as an unknown option.
