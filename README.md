@@ -65,12 +65,13 @@ implemented in bash itself.
 * `ttp -[x]C` - import all keys from a Google Authenticator export
 * `ttp -l` - list services setup
 * `ttp --version` - print the version of `ttp`
+* `ttp --completion bash|zsh` - print a tab completion script for your shell
 
 Codes are copied to the clipboard you paste from with Ctrl-V (or
-Cmd-V on macOS) when a clipboard tool is available. The `-x`, `-xc`, and
-`-xv` flags disable use of X11 and Wayland even when they are available,
-compared to no option, `-c`, and `-v`: codes are printed, keys are typed
-in, and QR codes are drawn in the terminal.
+Cmd-V on macOS) when a clipboard tool is available. Adding `x` to a flag
+(`-x`, `-xc`, `-xv`, `-xr`, `-xR`, `-xC`) disables use of X11 and
+Wayland even when they are available: codes are printed, keys are typed
+or pasted in, and QR codes are drawn in the terminal.
 
 All your keys share one passphrase. The first key you add asks for it
 twice; after that, `ttp -c` and `ttp -C` ask once and check it opens
@@ -99,6 +100,20 @@ start with `-` or `.`.
 A key can be a base32 secret or an `otpauth://totp/` URI, such as the
 ones in QR codes. URIs may set `digits` (1 to 10), `period`, and
 `algorithm`: `SHA1` (the default), `SHA256` or `SHA512`.
+
+### Tab completion
+
+`ttp` can complete service names and flags when you press Tab. Add one
+line to your shell's startup file:
+
+    # ~/.bashrc
+    eval "$(ttp --completion bash)"
+
+    # ~/.zshrc, after compinit
+    source <(ttp --completion zsh)
+
+Completion lists the files in your key directory; it doesn't decrypt
+anything or ask for your passphrase.
 
 ### Importing from Google Authenticator
 
@@ -152,9 +167,9 @@ Master [git repository](https://github.com/dterei/ttp):
 The tests need only bash and gpg, and leave your keys alone: they use a
 temporary directory and their own GnuPG home. If
 [`oathtool`](https://www.nongnu.org/oath-toolkit/) is installed, they
-also check `ttp`'s codes against it. They run `ttp` with whichever bash
-runs the test script, so `/bin/bash test/run-tests.sh` on macOS tests
-the system's bash 3.2.
+also check `ttp`'s codes against it, and if zsh is, its tab completion.
+They run `ttp` with whichever bash runs the test script, so
+`/bin/bash test/run-tests.sh` on macOS tests the system's bash 3.2.
 
 For every pull request, GitHub Actions runs the tests on Linux and macOS
 and with each bash release from 3.2 to 5.3, and runs

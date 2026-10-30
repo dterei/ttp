@@ -698,7 +698,7 @@ check_contains "-x unknown service: message" "no key for nosuch" "$out"
 run -xv nosuch
 check "-xv unknown service: exit status" 1 "$rc"
 
-for args in "" "-c" "-x" "a b c" "-l x" "-R x" "-xR x" "-C x" "-xC x" "--version x"; do
+for args in "" "-c" "-x" "a b c" "-l x" "-R x" "-xR x" "-C x" "-xC x" "--version x" "--completion"; do
     run $args
     check "usage for '$args': exit status" 1 "$rc"
     check_contains "usage for '$args': message" "usage:" "$out"
@@ -1083,6 +1083,91 @@ run -xv eight
 check "-xv with URI: prints URI unchanged" "$uri" "$out"
 run -xv demo
 check "-xv with plain key: builds URI" "otpauth://totp/demo?secret=$key&issuer=demo" "$out"
+
+########################################################################
+# Tab completion, for service names in a key directory of its own.
+
+echo "Testing tab completion"
+run --completion fish
+check "--completion fish: exit status" 1 "$rc"
+check_contains "--completion fish: message" "no completion for 'fish': use bash or zsh" "$out"
+
+mkdir -p "$tmp/comp/ttp" "$tmp/comp/ttp/folder.gpg" "$tmp/nokeys-home"
+for name in github gitlab "my bank" work; do
+    : > "$tmp/comp/ttp/$name.gpg"
+done
+: > "$tmp/comp/ttp/.github.gpg.new"
+comp_home=$tmp/comp
+
+run --completion bash
+check "--completion bash: exit status" 0 "$rc"
+eval "$("$BASH" "$ttp" --completion bash)"
+check_contains "bash completion: registered for ttp" "_ttp ttp" "$(complete -p ttp)"
+# tab WORDS...: print what bash offers to complete the last of WORDS in
+# "ttp WORDS", with the keys in $comp_home.
+tab() {
+    COMP_WORDS=(ttp "$@")
+    COMP_CWORD=$#
+    COMPREPLY=()
+    XDG_CONFIG_HOME=$comp_home _ttp
+    echo "${COMPREPLY[*]}"
+}
+check "tab: service names" 'github gitlab my\ bank work' "$(tab '')"
+check "tab: names with a prefix" 'github gitlab' "$(tab git)"
+check "tab: a name with a space is quoted" 'my\ bank' "$(tab my)"
+check "tab: after a quoted space" 'my\ bank' "$(tab 'my\ b')"
+check "tab: flags" '-x -c -v -r -R -C -l --version --completion' "$(tab -)"
+check "tab: long flags" '--version --completion' "$(tab --)"
+check "tab: names after -v" 'github gitlab' "$(tab -v git)"
+check "tab: names after -xr" 'work' "$(tab -xr w)"
+check "tab: nothing after -c, which needs a new name" '' "$(tab -c g)"
+check "tab: nothing after -l" '' "$(tab -l '')"
+check "tab: nothing after a service" '' "$(tab github '')"
+check "tab: names after -x" 'github gitlab my\ bank work' "$(tab -x '')"
+check "tab: flags after -x" '-c -v -r -R -C -l' "$(tab -x -)"
+check "tab: names after -x -v" 'github gitlab' "$(tab -x -v g)"
+check "tab: shells after --completion" 'bash zsh' "$(tab --completion '')"
+check "tab: no keys" '' "$(comp_home=$tmp/nowhere tab '')"
+check "tab: without XDG_CONFIG_HOME, ~/.config" 'github' \
+    "$(unset XDG_CONFIG_HOME; HOME=$tmp/nokeys-home; mkdir -p "$HOME/.config/ttp";
+       : > "$HOME/.config/ttp/github.gpg"; COMP_WORDS=(ttp g); COMP_CWORD=1; _ttp; echo "${COMPREPLY[*]}")"
+
+if command -v zsh > /dev/null; then
+    "$BASH" "$ttp" --completion zsh > "$tmp/ttp.zsh"
+    check "zsh completion: valid zsh" 0 "$(zsh -n "$tmp/ttp.zsh"; echo $?)"
+    # ztab WORDS...: print, separated by |, what the zsh completion offers
+    # for the last of WORDS in "ttp WORDS".  zsh's compadd and _describe
+    # are replaced by functions that record what they're given (zsh
+    # itself then keeps those matching what's typed).
+    ztab() {
+        # shellcheck disable=SC2016
+        XDG_CONFIG_HOME=$comp_home zsh -f -c '
+            typeset -a got
+            compdef() { : }
+            compadd() { if [[ $1 == -a ]]; then got+=(${(P)2}); else got+=("$@"); fi }
+            _describe() { got+=(${${(P)4}%%:*}) }
+            source "$1"
+            shift
+            words=(ttp "$@")
+            CURRENT=$(( $# + 1 ))
+            PREFIX=${@[-1]}
+            _ttp
+            print -r -- ${(j:|:)got}' zsh "$tmp/ttp.zsh" "$@"
+    }
+    check "zsh tab: service names" 'github|gitlab|my bank|work' "$(ztab '')"
+    check "zsh tab: flags" '-c|-v|-r|-R|-C|-l|-x|--version|--completion' "$(ztab -)"
+    check "zsh tab: names after -v" 'github|gitlab|my bank|work' "$(ztab -v g)"
+    check "zsh tab: names after -xr" 'github|gitlab|my bank|work' "$(ztab -xr w)"
+    check "zsh tab: nothing after -c" '' "$(ztab -c g)"
+    check "zsh tab: nothing after a service" '' "$(ztab github '')"
+    check "zsh tab: names after -x" 'github|gitlab|my bank|work' "$(ztab -x '')"
+    check "zsh tab: flags after -x" '-c|-v|-r|-R|-C|-l' "$(ztab -x -)"
+    check "zsh tab: names after -x -r" 'github|gitlab|my bank|work' "$(ztab -x -r '')"
+    check "zsh tab: shells after --completion" 'bash|zsh' "$(ztab --completion '')"
+    check "zsh tab: no keys" '' "$(comp_home=$tmp/nowhere ztab '')"
+else
+    echo "  (zsh not found; skipping zsh completion tests)"
+fi
 
 ########################################################################
 # Cross-check against oathtool, an independent TOTP implementation, when
