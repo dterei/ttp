@@ -721,7 +721,7 @@ check "-x: prints current code" yes \
 # Getting a code turns the expiry warning on.  Pin totp to a second
 # before the end of a period, by wrapping it, in a subshell.
 out=$(eval "orig_$(declare -f totp)"
-      # shellcheck disable=SC2317
+      # shellcheck disable=SC2317,SC2329
       totp() { orig_totp 59; }
       keydir=$tmp/config/ttp main -x demo 2>&1)
 check "-x near the end of a period: the code" 287082 "$(printf '%s\n' "$out" | no_expiry)"
