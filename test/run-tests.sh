@@ -258,6 +258,23 @@ check "URI with SHA1 algorithm" 287082 "$(echo "otpauth://totp/a?secret=$key&alg
 check "URI with 60 second period" 359152 "$(echo "otpauth://totp/a?secret=$key&period=60" | totp 120)"
 check "URI with a key line and no newline" 287082 "$(printf '%s' "$key" | totp 30)"
 
+# expiry KEY TIME: print what totp says on stderr for KEY at TIME, with
+# the expiry warning on.
+expiry() {
+    { printf '%s\n' "$1" | warn_expiry=1 totp "$2" > /dev/null; } 2>&1
+}
+check "expiry: no warning with 6 seconds left" "" "$(expiry "$key" 54)"
+check_contains "expiry: warns with 5 seconds left" "this code expires in 5s" "$(expiry "$key" 55)"
+check_contains "expiry: warns with 1 second left" "this code expires in 1s" "$(expiry "$key" 59)"
+check "expiry: no warning at the start of a period" "" "$(expiry "$key" 60)"
+check_contains "expiry: 60 second period, 5 seconds left" "this code expires in 5s" \
+    "$(expiry "otpauth://totp/a?secret=$key&period=60" 115)"
+# 35 seconds left, where a 30 second period would have 5.
+check "expiry: 60 second period, 35 seconds left" "" \
+    "$(expiry "otpauth://totp/a?secret=$key&period=60" 85)"
+check "expiry: no warning unless asked" "" "$({ printf '%s\n' "$key" | totp 59 > /dev/null; } 2>&1)"
+check "expiry: the code is unchanged" 287082 "$(printf '%s\n' "$key" | warn_expiry=1 totp 59 2> /dev/null)"
+
 # expect_error NAME MESSAGE INPUT
 expect_error() {
     local out rc
@@ -423,10 +440,24 @@ chmod +x "$tmp/bin/gpg" "$tmp/bin/qrencode" "$tmp/failbin/gpg"
 export PATH="$tmp/bin:$PATH" GNUPGHOME="$tmp/gnupg" XDG_CONFIG_HOME="$tmp/config"
 unset DISPLAY WAYLAND_DISPLAY
 
+# no_expiry: copy stdin to stdout without ttp's warning that a code
+# is about to expire, which depends on when a test runs.  The expiry
+# tests check the warning itself.
+no_expiry() {
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            *": this code expires in "[0-9]*s) ;;
+            *) printf '%s\n' "$line" ;;
+        esac
+    done
+}
+
 # run ARGS...: run ttp, setting $out and $rc.
 run() {
     out=$("$BASH" "$ttp" "$@" 2>&1)
     rc=$?
+    out=$(printf '%s\n' "$out" | no_expiry)
 }
 
 # runt ANSWERS ARGS...: like run, but type ANSWERS (with \n escapes) at
@@ -531,7 +562,7 @@ after=$(echo "$key" | totp)
 code=$(cat "$tmp/stdout")
 check "-xr: same codes as before" yes \
     "$(test "$code" = "$before" -o "$code" = "$after" && echo yes || echo "no ($code)")"
-check "-xr: no more upgrade hint" "" "$(cat "$tmp/stderr")"
+check "-xr: no more upgrade hint" "" "$(no_expiry < "$tmp/stderr")"
 "$BASH" "$ttp" -l > /dev/null 2> "$tmp/stderr"
 check "-l after -xr: nothing to upgrade" "" "$(cat "$tmp/stderr")"
 
@@ -686,6 +717,15 @@ after=$(echo "$key" | totp)
 check "-x: exit status" 0 "$rc"
 check "-x: prints current code" yes \
     "$(test "$out" = "$before" -o "$out" = "$after" && echo yes || echo "no ($out)")"
+
+# Getting a code turns the expiry warning on.  Pin totp to a second
+# before the end of a period, by wrapping it, in a subshell.
+out=$(eval "orig_$(declare -f totp)"
+      # shellcheck disable=SC2317
+      totp() { orig_totp 59; }
+      keydir=$tmp/config/ttp main -x demo 2>&1)
+check "-x near the end of a period: the code" 287082 "$(printf '%s\n' "$out" | no_expiry)"
+check_contains "-x near the end of a period: the warning" "this code expires in 1s" "$out"
 
 run -xc demo <<< "$key"
 check "-xc existing key: exit status" 1 "$rc"
@@ -972,6 +1012,7 @@ clip() {
     rm -f "$tmp/clip"
     out=$(env PATH="$tmp/clipbin:$PATH" "$@" "$BASH" "$ttp" demo 2>&1)
     rc=$?
+    out=$(printf '%s\n' "$out" | no_expiry)
     clip=$(cat "$tmp/clip" 2>/dev/null)
 }
 before=$(echo "$key" | totp)
@@ -993,7 +1034,7 @@ clip DISPLAY=:0
 check "X11 without xclip: xsel uses the Ctrl-V clipboard" "xsel --clipboard --input" "${clip%%$'\n'*}"
 
 rm -f "$tmp/clip"
-out=$(env PATH="$tmp/clipbin:$PATH" WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 "$BASH" "$ttp" -x demo 2>&1)
+out=$(env PATH="$tmp/clipbin:$PATH" WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 "$BASH" "$ttp" -x demo 2>&1 | no_expiry)
 check "-x with Wayland and X11: prints the code" 6 "${#out}"
 check "-x with Wayland and X11: no clipboard" no "$(test -e "$tmp/clip" && echo yes || echo no)"
 
@@ -1008,7 +1049,7 @@ cat >> "$tmp/clip"
 EOF
     chmod +x "$tmp/macbin/pbcopy"
     rm -f "$tmp/clip"
-    out=$(env PATH="$tmp/macbin:$PATH" DISPLAY=:0 "$BASH" "$ttp" demo 2>&1)
+    out=$(env PATH="$tmp/macbin:$PATH" DISPLAY=:0 "$BASH" "$ttp" demo 2>&1 | no_expiry)
     check "pbcopy: message" "Sending code to OSX clipboard" "$out"
     check "pbcopy: copies a code" 6 "$(sed -n 2p "$tmp/clip" | tr -d '\n' | wc -c | tr -d ' ')"
 fi
