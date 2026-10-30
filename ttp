@@ -638,7 +638,7 @@ name_from() {
         case "$punct" in
             *"$c"*) c=- ;;
         esac
-        out+=$c
+        out+="$c"
     done
     while test "${out//--/-}" != "$out"; do
         out=${out//--/-}
