@@ -696,11 +696,11 @@ suggest_name() {
     echo "$base-$n"
 }
 
-# Pick one of the URIs on stdin, asking which to use.
+# Pick one of the URIs on stdin, asking which to use.  Stdin is a pipe
+# and stdout is captured, so ask on stderr and read the answers from fd
+# 3, which the caller opens on the terminal.
 gk() {
     local uri account ans
-    # Stdin is a pipe and stdout is captured, so ask on stderr and read
-    # the answers from the terminal.
     while IFS= read -r uri; do
         account=${uri#otpauth://totp/}
         account=${account%%\?*}
@@ -710,7 +710,7 @@ gk() {
             echo "$uri"
             return
         fi
-    done 3< "$ttydev"
+    done
 }
 
 # Succeed if key file $1 is passphrase-encrypted with weaker settings
@@ -745,6 +745,39 @@ ask_pass() {
     rc=$?
     echo >&2
     return $rc
+}
+
+# Ask for the passphrase to encrypt new keys with, into $pass, reading
+# it from fd 3.  So that all keys share one passphrase, when there are
+# keys already it must open the newest (after "ttp -R", that is all of
+# them); otherwise it's asked for twice, to catch typos.
+ask_new_pass() {
+    local f newest='' first
+    for f in "$keydir"/*.gpg; do
+        if test -f "$f" && { test -z "$newest" || test "$f" -nt "$newest"; }; then
+            newest=$f
+        fi
+    done
+    if test -n "$newest"; then
+        ask_pass "Passphrase: " || exit 1
+        if ! decrypt_with "$newest" "$pass" > /dev/null; then
+            f=${newest##*/}
+            echo "$prog: that isn't your keys' passphrase: it doesn't open ${f%.gpg}'s key ('$prog -R' can give all your keys one passphrase)" >&2
+            exit 1
+        fi
+        return
+    fi
+    ask_pass "New passphrase: " || exit 1
+    first=$pass
+    if test -z "$first"; then
+        echo "$prog: the passphrase can't be empty" >&2
+        exit 1
+    fi
+    ask_pass "Repeat passphrase: " || exit 1
+    if test "$pass" != "$first"; then
+        echo "$prog: the passphrases don't match" >&2
+        exit 1
+    fi
 }
 
 # Print the key in key file $1, decrypted with passphrase $2.  printf is
@@ -867,9 +900,9 @@ reencrypt_all() {
 
 # Import every key in the QR codes on screen, or in pasted URIs, such as
 # a Google Authenticator export's.  Asks whether to keep each key and
-# what to call it, then encrypts them all with one passphrase.
+# what to call it, then encrypts them all with the keys' passphrase.
 import_all() {
-    local line uri issuer account label name answer pass newpass i imported='' failed=''
+    local line uri issuer account label name answer pass i imported='' failed=''
     local -a found uris names
     found=() uris=() names=()
     if test -n "$DISPLAY"; then
@@ -924,20 +957,10 @@ import_all() {
             echo "Nothing to import."
             exit 0
         fi
-        ask_pass "Passphrase for the new keys: " || exit 1
-        newpass=$pass
-        if test -z "$newpass"; then
-            echo "$prog: the passphrase can't be empty" >&2
-            exit 1
-        fi
-        ask_pass "Repeat passphrase: " || exit 1
-        if test "$pass" != "$newpass"; then
-            echo "$prog: the passphrases don't match" >&2
-            exit 1
-        fi
-    } 3< "$ttydev"
+        ask_new_pass
+    } 3< "$ttydev" || exit 1
     for ((i = 0; i < ${#names[@]}; i++)); do
-        if encrypt_to "$keydir/${names[i]}.gpg" "$newpass" < <(printf '%s\n' "${uris[i]}"); then
+        if encrypt_to "$keydir/${names[i]}.gpg" "$pass" < <(printf '%s\n' "${uris[i]}"); then
             imported+="${imported:+, }${names[i]}"
         else
             failed+="${failed:+, }${names[i]}"
@@ -953,7 +976,7 @@ import_all() {
 }
 
 main() {
-    local mode target code key secret f newfile old name
+    local mode target code key secret f old name pass
 
     # Never write a core dump, which could hold a key.
     ulimit -c 0 2> /dev/null
@@ -1044,32 +1067,38 @@ main() {
                 exit 1
             fi
             mkdir -p "$keydir" || exit 1
-            key=
-            if test -n "$DISPLAY"; then
-                key=$(zbarimg x:root 2> /dev/null | qr_uris | gk)
-            fi
-            if test -z "$key"; then
-                echo -n "Enter Base32-encoded authenticator key: "
-                IFS= read -r key
-                case "$key" in
-                    otpauth-migration://*)
-                        key=$(printf '%s\n' "$key" | qr_uris | gk)
-                        ;;
-                esac
-                if test -z "$key"; then
-                    echo "Aborted."
-                    exit 0
+            {
+                key=
+                if test -n "$DISPLAY"; then
+                    key=$(zbarimg x:root 2> /dev/null | qr_uris | gk)
                 fi
-            fi
-            printf '%s\n' "$key" | totp 0 > /dev/null || exit 1
-            printf '%s\n' "$key" \
-                | "$gpgcmd" "${gpgoptions[@]}" "${gpgencrypt[@]}" -c \
-                    -o "$keydir/$target.gpg" || exit 1
+                if test -z "$key"; then
+                    echo -n "Enter Base32-encoded authenticator key: "
+                    IFS= read -r key
+                    case "$key" in
+                        otpauth-migration://*)
+                            key=$(printf '%s\n' "$key" | qr_uris | gk)
+                            ;;
+                    esac
+                    if test -z "$key"; then
+                        echo "Aborted."
+                        exit 0
+                    fi
+                fi
+                printf '%s\n' "$key" | totp 0 > /dev/null || exit 1
+                ask_new_pass
+            } 3< "$ttydev" || exit 1
+            encrypt_to "$keydir/$target.gpg" "$pass" < <(printf '%s\n' "$key") || exit 1
             ;;
         -r|-xr)
+            # The key keeps its passphrase; -R changes passphrases.
             need_key "$target"
             umask 077
-            secret=$("$gpgcmd" "${gpgoptions[@]}" -d "$keydir/$target.gpg") || exit 1
+            { ask_pass "Passphrase: " || exit 1; } 3< "$ttydev" || exit 1
+            if ! secret=$(decrypt_with "$keydir/$target.gpg" "$pass"); then
+                echo "$prog: that passphrase doesn't open $target's key" >&2
+                exit 1
+            fi
             # Check the key decrypted to something valid before replacing
             # the file, so a failed decryption can't lose the key.
             if test -z "$secret"; then
@@ -1077,16 +1106,7 @@ main() {
                 exit 1
             fi
             printf '%s\n' "$secret" | totp 0 > /dev/null || exit 1
-            # Write next to the old file, then swap it in, so an
-            # interruption leaves the old key in place.  Names can't
-            # start with ".", so this can't clash with another key.
-            newfile="$keydir/.$target.gpg.new"
-            # shellcheck disable=SC2064
-            trap "rm -f $(printf '%q' "$newfile")" EXIT
-            rm -f "$newfile"
-            printf '%s\n' "$secret" \
-                | "$gpgcmd" "${gpgoptions[@]}" "${gpgencrypt[@]}" -c -o "$newfile" || exit 1
-            mv -f "$newfile" "$keydir/$target.gpg" || exit 1
+            encrypt_to "$keydir/$target.gpg" "$pass" < <(printf '%s\n' "$secret") || exit 1
             echo "Re-encrypted $target's key."
             ;;
         -R|-xR)

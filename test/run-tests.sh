@@ -296,7 +296,7 @@ qr_lines=$(printf 'QR-Code:https://example.com\nQR-Code:%s\nQR-Code:%s\n' "$qr_a
 # ANSWERS (with \n escapes), setting $chosen and $prompts.
 choose() {
     printf '%b' "$1" > "$tmp/answers"
-    chosen=$(qr_uris <<< "$qr_lines" | ttydev=$tmp/answers gk 2> "$tmp/prompts")
+    chosen=$(qr_uris <<< "$qr_lines" | gk 2> "$tmp/prompts" 3< "$tmp/answers")
     prompts=$(cat "$tmp/prompts")
 }
 choose '\n'
@@ -429,8 +429,21 @@ run() {
     rc=$?
 }
 
-run -xc demo <<< "$key"
+# runt ANSWERS ARGS...: like run, but type ANSWERS (with \n escapes) at
+# the prompts ttp reads from the terminal, such as for passphrases.  It
+# calls ttp's main, sourced above, in a subshell, as main exits.
+runt() {
+    printf '%b' "$1" > "$tmp/answers"
+    shift
+    out=$(keydir=$tmp/config/ttp ttydev=$tmp/answers main "$@" 2>&1)
+    rc=$?
+}
+
+# The first key's passphrase is asked for twice.
+runt 'test-passphrase\ntest-passphrase\n' -xc demo <<< "$key"
 check "-xc: exit status" 0 "$rc"
+check_contains "-xc first key: asks for a new passphrase" "New passphrase: " "$out"
+check_contains "-xc first key: asks again to confirm it" "Repeat passphrase: " "$out"
 check "-xc: key file created" yes "$(test -f "$tmp/config/ttp/demo.gpg" && echo yes)"
 # ls is the portable way to read permissions; stat differs across systems.
 # shellcheck disable=SC2012
@@ -474,11 +487,7 @@ check "-x with a current key: no upgrade hint" no \
 
 # -r must leave the old key in place whenever it fails.
 cp "$tmp/config/ttp/oldkey.gpg" "$tmp/oldkey.backup"
-mkdir -p "$tmp/wrongbin" "$tmp/noencbin"
-cat > "$tmp/wrongbin/gpg" <<EOF
-#!/bin/sh
-exec "$real_gpg" --batch --passphrase wrong-passphrase "\$@"
-EOF
+mkdir -p "$tmp/noencbin"
 # A gpg that decrypts but fails to encrypt.
 cat > "$tmp/noencbin/gpg" <<EOF
 #!/bin/sh
@@ -487,20 +496,27 @@ case " \$* " in
 esac
 exec "$real_gpg" --batch --passphrase test-passphrase "\$@"
 EOF
-chmod +x "$tmp/wrongbin/gpg" "$tmp/noencbin/gpg"
-for bin in wrongbin noencbin; do
-    out=$(PATH="$tmp/$bin:$PATH" "$BASH" "$ttp" -xr oldkey 2>&1)
-    check "-xr failing ($bin): exit status" 1 "$?"
-    check "-xr failing ($bin): key unchanged" same \
+chmod +x "$tmp/noencbin/gpg"
+for how in "wrong passphrase" "gpg fails to encrypt"; do
+    case $how in
+        wrong*) runt 'wrong-passphrase\n' -xr oldkey ;;
+        *) PATH="$tmp/noencbin:$PATH" runt 'test-passphrase\n' -xr oldkey ;;
+    esac
+    check "-xr failing ($how): exit status" 1 "$rc"
+    check "-xr failing ($how): key unchanged" same \
         "$(cmp -s "$tmp/oldkey.backup" "$tmp/config/ttp/oldkey.gpg" && echo same || echo changed)"
-    check "-xr failing ($bin): no temporary file" no \
+    check "-xr failing ($how): no temporary file" no \
         "$(test -e "$tmp/config/ttp/.oldkey.gpg.new" && echo yes || echo no)"
 done
+check_contains "-xr with a wrong passphrase: message" "that passphrase doesn't open oldkey's key" \
+    "$(runt 'wrong-passphrase\n' -xr oldkey; echo "$out")"
 
 before=$(echo "$key" | totp)
-run -xr oldkey
+runt 'test-passphrase\n' -xr oldkey
 check "-xr: exit status" 0 "$rc"
 check_contains "-xr: message" "Re-encrypted oldkey's key." "$out"
+check "-xr: asks for the passphrase once, and keeps it" 1 \
+    "$(printf '%s\n' "$out" | grep -ci 'passphrase: ')"
 packets=$("$real_gpg" --batch --pinentry-mode loopback --passphrase test-passphrase \
     --list-packets "$tmp/config/ttp/oldkey.gpg" 2>&1)
 check_contains "-xr: now AES-256" "cipher 9," "$packets"
@@ -688,17 +704,26 @@ for args in "" "-c" "-x" "a b c" "-l x" "-R x" "-xR x" "-C x" "-xC x" "--version
     check_contains "usage for '$args': message" "usage:" "$out"
 done
 
-run -xc empty <<< ""
+runt '' -xc empty <<< ""
 check "-xc with no key: exit status" 0 "$rc"
 check_contains "-xc with no key: message" "Aborted." "$out"
 check "-xc with no key: no file" no "$(test -e "$tmp/config/ttp/empty.gpg" && echo yes || echo no)"
 
-run -xc bad <<< "NOT!VALID"
+runt '' -xc bad <<< "NOT!VALID"
 check "-xc with bad key: exit status" 1 "$rc"
 check "-xc with bad key: no file" no "$(test -e "$tmp/config/ttp/bad.gpg" && echo yes || echo no)"
 
-out=$(PATH="$tmp/failbin:$PATH" "$BASH" "$ttp" -xc broken <<< "$key" 2>&1)
-check "-xc when gpg fails: exit status" 1 "$?"
+PATH="$tmp/failbin:$PATH" runt 'test-passphrase\n' -xc broken <<< "$key"
+check "-xc when gpg fails: exit status" 1 "$rc"
+check "-xc when gpg fails: no file" no "$(test -e "$tmp/config/ttp/broken.gpg" && echo yes || echo no)"
+
+# Once there are keys, new ones must use their passphrase, asked for once.
+runt 'not-the-passphrase\n' -xc other <<< "$key"
+check "-xc with the wrong passphrase: exit status" 1 "$rc"
+check_contains "-xc with the wrong passphrase: message" \
+    "that isn't your keys' passphrase: it doesn't open demo's key" "$out"
+check "-xc with the wrong passphrase: no file" no \
+    "$(test -e "$tmp/config/ttp/other.gpg" && echo yes || echo no)"
 
 for name in ../escape a/b .hidden -dash; do
     for mode in -xc -x -xv -xr; do
@@ -716,8 +741,10 @@ check "invalid names: no files written" "demo.gpg" "$(cd "$tmp/config/ttp" && ec
 check "invalid names: nothing outside the key directory" no \
     "$(test -e "$tmp/config/escape.gpg" && echo yes || echo no)"
 
-run -xc "my bank" <<< "$key"
+runt 'test-passphrase\n' -xc "my bank" <<< "$key"
 check "-xc name with a space: exit status" 0 "$rc"
+check "-xc with keys: asks for the passphrase once" "1 0" \
+    "$(printf '%s\n' "$out" | grep -c 'Passphrase: ') $(printf '%s\n' "$out" | grep -c 'Repeat')"
 run -x "my bank"
 check "-x name with a space: exit status" 0 "$rc"
 rm -f "$tmp/config/ttp/my bank.gpg"
@@ -741,7 +768,7 @@ scan() {
 }
 
 printf '%s\n' "$qr_lines" > "$tmp/screen"
-scan scanned 'n\ny\n' < /dev/null
+scan scanned 'n\ny\ntest-passphrase\n' < /dev/null
 check "-c from screen: exit status" 0 "$rc"
 check_contains "-c from screen: asks which code" "Use B:bob? (y)" "$out"
 run -xv scanned
@@ -753,13 +780,13 @@ check_contains "-c declining every code: asks for a key" "Enter Base32-encoded a
 check "-c declining every code: no file" no "$(test -e "$tmp/config/ttp/declined.gpg" && echo yes || echo no)"
 
 : > "$tmp/screen"
-scan typed '' <<< "$key"
+scan typed 'test-passphrase\n' <<< "$key"
 check "-c with no QR code: exit status" 0 "$rc"
 run -xv typed
 check "-c with no QR code: stores the typed key" "otpauth://totp/typed?secret=$key&issuer=typed" "$out"
 # A Google Authenticator export on screen: pick bob, the second key.
 printf 'QR-Code:%s\n' "$export_two" > "$tmp/screen"
-scan exported 'n\ny\n' < /dev/null
+scan exported 'n\ny\ntest-passphrase\n' < /dev/null
 check "-c from an export on screen: exit status" 0 "$rc"
 check_contains "-c from an export on screen: asks about alice" "Use Example:alice@example.com? (y)" "$out"
 run -xv exported
@@ -769,7 +796,7 @@ check "-x with a key from an export: 8 digits" 8 "${#out}"
 
 # A pasted export URI: pick alice, the first key.
 : > "$tmp/screen"
-scan pasted 'y\n' <<< "$export_two"
+scan pasted 'y\ntest-passphrase\n' <<< "$export_two"
 check "-c with a pasted export: exit status" 0 "$rc"
 run -xv pasted
 check "-c with a pasted export: stores the chosen key" "$uri_alice" "$out"
@@ -823,7 +850,7 @@ cimport -C n n < /dev/null
 check "-C declining every key: exit status" 0 "$rc"
 check_contains "-C declining every key: message" "Nothing to import." "$out"
 check "-C declining every key: no passphrase asked" no \
-    "$(printf '%s\n' "$out" | grep -q Passphrase && echo yes || echo no)"
+    "$(printf '%s\n' "$out" | grep -qi passphrase && echo yes || echo no)"
 check "-C declining every key: no files" "" "$(ckeys)"
 
 cimport -C "" "" pass-a pass-b < /dev/null
@@ -847,11 +874,18 @@ check "-C, gpg fails to encrypt: no files" "" "$(ckeys)"
 # Big Co's key under the suggested name, carol's as example, skip Zoë's,
 # try two names for alice before settling on alice, and keep bob's.
 printf 'QR-Code:%s\nQR-Code:%s\n' "$export_mixed" "$export_two" > "$tmp/screen"
-printf 'old\n' | "$real_gpg" --batch --pinentry-mode loopback -q --passphrase old \
+printf 'old\n' | "$real_gpg" --batch --pinentry-mode loopback -q --passphrase pass-imp \
     -c -o "$tmp/ckeys/big-co.gpg"
 cp "$tmp/ckeys/big-co.gpg" "$tmp/big-co.backup"
-cimport -C "" y n work/alice example alice "" pass-imp pass-imp < /dev/null
+cimport -C "" y n work/alice example alice "" pass-wrong < /dev/null
+check "-C with the wrong passphrase: exit status" 1 "$rc"
+check_contains "-C with the wrong passphrase: message" \
+    "that isn't your keys' passphrase: it doesn't open big-co's key" "$out"
+check "-C with the wrong passphrase: nothing imported" "big-co.gpg" "$(ckeys)"
+cimport -C "" y n work/alice example alice "" pass-imp < /dev/null
 check "-C: exit status" 0 "$rc"
+check "-C with keys: asks for their passphrase once" "1 0" \
+    "$(printf '%s\n' "$out" | grep -c 'Passphrase: ') $(printf '%s\n' "$out" | grep -c 'Repeat')"
 check_contains "-C: skips the HOTP key" "skipping counter: counter-based (HOTP)" "$out"
 check_contains "-C: suggests the issuer and account when the issuer is taken" \
     "Import Big Co:sha256 user as big-co-sha256-user? (Y/n/other name)" "$out"
@@ -893,6 +927,31 @@ check_contains "-xC pasted: summary" "Imported example, github." "$out"
 check_contains "-xC pasted: skips an invalid key" "skipping Bad:x" "$out"
 check "-xC pasted: stops at the empty line" "example.gpg github.gpg" "$(ckeys)"
 check "-xC pasted: the plain URI's key" "otpauth://totp/GitHub:me?secret=$key&issuer=GitHub" "$(ckey github)"
+
+# With keys using different passphrases, from before ttp used one, new
+# keys must use the newest key's.  The older key sorts first, so a
+# check of the first key would pick it.
+mkdir -p "$tmp/mixed"
+printf '%s\n' "$key" | "$real_gpg" --batch --pinentry-mode loopback -q --passphrase pass-older \
+    -c -o "$tmp/mixed/early.gpg"
+touch -t 200001010000 "$tmp/mixed/early.gpg"
+printf '%s\n' "$key" | "$real_gpg" --batch --pinentry-mode loopback -q --passphrase pass-newer \
+    -c -o "$tmp/mixed/late.gpg"
+# madd PASSPHRASE: add a key called added to $tmp/mixed, typing PASSPHRASE.
+madd() {
+    printf '%s\n' "$1" > "$tmp/answers"
+    out=$(keydir=$tmp/mixed ttydev=$tmp/answers gpgcmd=$real_gpg main -xc added 2>&1 <<< "$key")
+    rc=$?
+}
+madd pass-older
+check "mixed passphrases: the older key's is refused" 1 "$rc"
+check_contains "mixed passphrases: names the newest key" "it doesn't open late's key" "$out"
+check_contains "mixed passphrases: suggests -R" "-R' can give all your keys one passphrase" "$out"
+madd pass-newer
+check "mixed passphrases: the newest key's is used" 0 "$rc"
+check "mixed passphrases: the new key opens with it" "$key" \
+    "$(printf 'pass-newer\n' | "$real_gpg" --batch --pinentry-mode loopback -q --passphrase-fd 0 \
+        -d "$tmp/mixed/added.gpg" 2> /dev/null)"
 rm -f "$tmp/bin/zbarimg" "$tmp/config/ttp/scanned.gpg" "$tmp/config/ttp/typed.gpg" \
     "$tmp/config/ttp/exported.gpg" "$tmp/config/ttp/pasted.gpg"
 
@@ -1015,7 +1074,7 @@ case "$out" in
 esac
 
 uri="otpauth://totp/Example%3Aalice%40example.com?secret=$key&issuer=Example&digits=8"
-run -xc eight <<< "$uri"
+runt 'test-passphrase\n' -xc eight <<< "$uri"
 check "-xc with URI: exit status" 0 "$rc"
 run -x eight
 check "-x with 8-digit URI: length" 8 "${#out}"

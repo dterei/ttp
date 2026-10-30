@@ -72,16 +72,20 @@ Cmd-V on macOS) when a clipboard tool is available. The `-x`, `-xc`, and
 compared to no option, `-c`, and `-v`: codes are printed, keys are typed
 in, and QR codes are drawn in the terminal.
 
+All your keys share one passphrase. The first key you add asks for it
+twice; after that, `ttp -c` and `ttp -C` ask once and check it opens
+your newest key, so a typo can't save a key you can't open.
+
 Keys are encrypted with AES-256, and your passphrase is hashed with
 SHA-512 as many times as gpg allows. Keys saved by older versions of
 `ttp`, or with older gpg, may use weaker settings: `ttp -l`, and getting
 a code, warn about these. `ttp -r` _service_ re-encrypts one with the
-current settings. It asks for the current passphrase, then a new one,
-which can be the same, and only replaces the key file once the new one
-is written.
+current settings, keeping its passphrase, and only replaces the key file
+once the new one is written.
 
-`ttp -R` re-encrypts every key at once, and is also how to change your
-passphrase, or give all your keys the same one. It asks for your current
+`ttp -R` re-encrypts every key at once, and is how to change your
+passphrase. Keys saved by older versions of `ttp` may each have their
+own passphrase; `ttp -R` gives them all the same one. It asks for your current
 passphrase and a new one (which can be the same), then tries each key
 with every passphrase that has worked so far. It only asks about a key
 that none of them open, so you type each old passphrase once; leave the
@@ -104,7 +108,7 @@ accounts. Run `ttp -C` with the QR codes on screen (this needs X11 and
 `zbarimg`), or paste their `otpauth-migration://` URIs when asked. For
 each account, `ttp` suggests a name made from its issuer, such as
 `github`: press Enter to use it, type another name, or answer `n` to
-skip the account. It then asks for one passphrase for all the new keys.
+skip the account. It then asks for your keys' passphrase, once.
 
 To import a single account, run `ttp -c` _service_ with the QR code on
 screen, and answer `y` when `ttp` asks about that account, or paste the
