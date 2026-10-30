@@ -31,9 +31,8 @@
 #   gsettings - to warn if GNOME caches gpg passphrases indefinitely
 
 # Tip: To move keys from Google Authenticator, use its "Transfer
-# accounts" > "Export accounts" option, then run "ttp -c service" with
-# the export QR code on screen, or paste its otpauth-migration:// URI
-# at the key prompt.  Repeat for each account you want.
+# accounts" > "Export accounts" option, then run "ttp -C" with the
+# export QR code on screen, or paste its otpauth-migration:// URI.
 
 
 # The release workflow replaces "dev" with the release's version.
@@ -57,6 +56,7 @@ usage() {
     echo "       $prog -[x]v service    # view qrcode for service" >&2
     echo "       $prog -[x]r service    # re-encrypt service's key with current settings" >&2
     echo "       $prog -[x]R            # re-encrypt all keys with one new passphrase" >&2
+    echo "       $prog -[x]C            # import all keys from a Google Authenticator export" >&2
     echo "       $prog -l               # list services setup" >&2
     echo "       $prog --version        # print ttp's version" >&2
     echo "(The -x* flags disable use of X11 and Wayland even when they are available.)" >&2
@@ -582,6 +582,120 @@ qr_uris() {
     done
 }
 
+# Print URI-encoded string $1 decoded.  Backslashes are doubled first,
+# so printf only decodes the %XX escapes, and leaves a stray % as \x.
+# The replacements are quoted variables because bash 5.2 changed how it
+# reads backslashes in them.
+uri_decode() {
+    local bs=\\ s
+    s=${1//"$bs"/"$bs$bs"}
+    s=${s//%/"$bs"x}
+    printf '%b\n' "$s" 2> /dev/null
+}
+
+# Set label, issuer and account, decoded, from otpauth:// URI $1, whose
+# label is "issuer:account" or just "account", and which may also have
+# an issuer parameter.
+uri_names() {
+    local query param
+    label=${1#otpauth://totp/}
+    label=$(uri_decode "${label%%\?*}")
+    issuer=
+    query=${1#*\?}
+    while test -n "$query"; do
+        param=${query%%&*}
+        case "$query" in
+            *'&'*) query=${query#*&} ;;
+            *) query= ;;
+        esac
+        case "$param" in
+            issuer=*) issuer=$(uri_decode "${param#issuer=}") ;;
+        esac
+    done
+    account=$label
+    case "$label" in
+        *:*)
+            test -n "$issuer" || issuer=${label%%:*}
+            account=${label#*:}
+            ;;
+    esac
+    while test "${account# }" != "$account"; do
+        account=${account# }
+    done
+}
+
+# Print $1 made into a service name that's easy to type: lowercase, with
+# runs of spaces and ASCII punctuation other than ._@+- as one dash, and
+# no dash or dot at the start or dash at the end.
+name_from() {
+    local upper=ABCDEFGHIJKLMNOPQRSTUVWXYZ lower=abcdefghijklmnopqrstuvwxyz
+    local punct=$' \t!"#$%&\'()*,/:;<=>?[\\]^`{|}~' out='' c p i
+    for ((i = 0; i < ${#1}; i++)); do
+        c=${1:i:1}
+        case "$upper" in
+            *"$c"*) p=${upper%%"$c"*}; c=${lower:${#p}:1} ;;
+        esac
+        case "$punct" in
+            *"$c"*) c=- ;;
+        esac
+        out+=$c
+    done
+    while test "${out//--/-}" != "$out"; do
+        out=${out//--/-}
+    done
+    while :; do
+        case "$out" in
+            [-.]*) out=${out#?} ;;
+            *-) out=${out%-} ;;
+            *) break ;;
+        esac
+    done
+    echo "$out"
+}
+
+# Succeed if $1 can be a service name.  Names become file names, and -l
+# doesn't list hidden files.
+valid_name() {
+    case "$1" in
+        ''|-*|.*|*/*) return 1 ;;
+    esac
+}
+
+# Succeed if service name $1 has a key, or is in $names, the names an
+# import has chosen so far.
+name_taken() {
+    local n
+    test -e "$keydir/$1.gpg" && return 0
+    for n in "${names[@]}"; do
+        test "$n" = "$1" && return 0
+    done
+    return 1
+}
+
+# Print a free service name for the key whose issuer and account are in
+# $issuer and $account: the issuer's name, else that and the account's,
+# else the issuer's with a number.
+suggest_name() {
+    local base alt n=2
+    base=$(name_from "${issuer:-$account}")
+    test -n "$base" || base=key
+    if ! name_taken "$base"; then
+        echo "$base"
+        return
+    fi
+    if test -n "$issuer"; then
+        alt=$(name_from "$account")
+        if test -n "$alt" && ! name_taken "$base-$alt"; then
+            echo "$base-$alt"
+            return
+        fi
+    fi
+    while name_taken "$base-$n"; do
+        n=$((n + 1))
+    done
+    echo "$base-$n"
+}
+
 # Pick one of the URIs on stdin, asking which to use.
 gk() {
     local uri account ans
@@ -640,6 +754,26 @@ decrypt_with() {
         | "$gpgcmd" "${gpgoptions[@]}" --batch --passphrase-fd 0 -d "$1" 2> /dev/null
 }
 
+# Encrypt the key on stdin into key file $1, with passphrase $2 and the
+# current settings.  It's written next to $1, then moved into place, so
+# an interruption leaves any old key as it was.  Names can't start with
+# ".", so the temporary file can't clash with another key.
+encrypt_to() {
+    local newfile="${1%/*}/.${1##*/}.new"
+    # shellcheck disable=SC2064
+    trap "rm -f $(printf '%q' "$newfile")" EXIT
+    rm -f "$newfile"
+    if "$gpgcmd" "${gpgoptions[@]}" "${gpgencrypt[@]}" --batch \
+            --passphrase-fd 4 -c -o "$newfile" 4< <(printf '%s\n' "$2") \
+            && mv -f "$newfile" "$1"; then
+        trap - EXIT
+        return 0
+    fi
+    rm -f "$newfile"
+    trap - EXIT
+    return 1
+}
+
 # Move passphrase $1 to the front of $passes, adding it if it's new, so
 # the next key tries it first.  Each try takes a while, and the
 # passphrase that opened the last key is the best guess for the next.
@@ -658,7 +792,7 @@ try_first() {
 # about keys none of them open.  A key that can't be re-encrypted is
 # left as it is, and named at the end.
 reencrypt_all() {
-    local f name secret pass newpass newfile opened count=0 skipped=
+    local f name secret pass newpass opened count=0 skipped=
     local -a files passes
     files=()
     for f in "$keydir"/*.gpg; do
@@ -716,26 +850,104 @@ reencrypt_all() {
                 skipped+="${skipped:+, }$name"
                 continue
             fi
-            newfile="$keydir/.$name.gpg.new"
-            # shellcheck disable=SC2064
-            trap "rm -f $(printf '%q' "$newfile")" EXIT
-            rm -f "$newfile"
-            if printf '%s\n' "$secret" \
-                    | "$gpgcmd" "${gpgoptions[@]}" "${gpgencrypt[@]}" --batch \
-                        --passphrase-fd 4 -c -o "$newfile" 4< <(printf '%s\n' "$newpass") \
-                    && mv -f "$newfile" "$f"; then
+            if encrypt_to "$f" "$newpass" < <(printf '%s\n' "$secret"); then
                 count=$((count + 1))
             else
-                rm -f "$newfile"
                 echo "$prog: couldn't re-encrypt $name's key; leaving it as it is" >&2
                 skipped+="${skipped:+, }$name"
             fi
         done
     } 3< "$ttydev"
-    trap - EXIT
     echo "Re-encrypted $count of ${#files[@]} keys."
     if test -n "$skipped"; then
         echo "$prog: these keys were left as they were: $skipped" >&2
+        exit 1
+    fi
+}
+
+# Import every key in the QR codes on screen, or in pasted URIs, such as
+# a Google Authenticator export's.  Asks whether to keep each key and
+# what to call it, then encrypts them all with one passphrase.
+import_all() {
+    local line uri issuer account label name answer pass newpass i imported='' failed=''
+    local -a found uris names
+    found=() uris=() names=()
+    if test -n "$DISPLAY"; then
+        while IFS= read -r uri; do
+            found+=("$uri")
+        done < <(zbarimg x:root 2> /dev/null | qr_uris)
+    fi
+    if test ${#found[@]} -eq 0; then
+        echo "Paste otpauth-migration:// or otpauth:// URIs, one per line, then an empty line:"
+        while IFS= read -r line && test -n "$line"; do
+            while IFS= read -r uri; do
+                found+=("$uri")
+            done < <(printf '%s\n' "$line" | qr_uris)
+        done
+    fi
+    if test ${#found[@]} -eq 0; then
+        echo "$prog: no keys found" >&2
+        exit 1
+    fi
+    mkdir -p "$keydir" || exit 1
+    umask 077
+    {
+        for uri in "${found[@]}"; do
+            uri_names "$uri"
+            if ! printf '%s\n' "$uri" | totp 0 > /dev/null; then
+                echo "$prog: skipping $label" >&2
+                continue
+            fi
+            name=$(suggest_name)
+            while :; do
+                echo -n "Import $label as $name? (Y/n/other name) " >&2
+                IFS= read -r answer <&3 || exit 1
+                case "$answer" in
+                    ''|y|Y|yes) break ;;
+                    n|N|no) name=; break ;;
+                esac
+                if ! valid_name "$answer"; then
+                    echo "$prog: invalid service name: '$answer' (names can't contain '/', or start with '-' or '.')" >&2
+                elif name_taken "$answer"; then
+                    echo "$prog: there's already a key called $answer" >&2
+                else
+                    name=$answer
+                    break
+                fi
+            done
+            if test -n "$name"; then
+                uris+=("$uri")
+                names+=("$name")
+            fi
+        done
+        if test ${#names[@]} -eq 0; then
+            echo "Nothing to import."
+            exit 0
+        fi
+        ask_pass "Passphrase for the new keys: " || exit 1
+        newpass=$pass
+        if test -z "$newpass"; then
+            echo "$prog: the passphrase can't be empty" >&2
+            exit 1
+        fi
+        ask_pass "Repeat passphrase: " || exit 1
+        if test "$pass" != "$newpass"; then
+            echo "$prog: the passphrases don't match" >&2
+            exit 1
+        fi
+    } 3< "$ttydev"
+    for ((i = 0; i < ${#names[@]}; i++)); do
+        if encrypt_to "$keydir/${names[i]}.gpg" "$newpass" < <(printf '%s\n' "${uris[i]}"); then
+            imported+="${imported:+, }${names[i]}"
+        else
+            failed+="${failed:+, }${names[i]}"
+        fi
+    done
+    if test -n "$imported"; then
+        echo "Imported $imported."
+    fi
+    if test -n "$failed"; then
+        echo "$prog: couldn't import: $failed" >&2
         exit 1
     fi
 }
@@ -762,7 +974,7 @@ main() {
     case $# in
         1)
             case "$1" in
-                -l|-R|-xR) mode=$1 ;;
+                -l|-R|-xR|-C|-xC) mode=$1 ;;
                 --version)
                     echo "$prog $version"
                     exit 0
@@ -773,7 +985,7 @@ main() {
             ;;
         2)
             case "$1" in
-                -l|-R|-xR) usage ;;
+                -l|-R|-xR|-C|-xC) usage ;;
             esac
             mode=$1 target=$2
             ;;
@@ -781,17 +993,14 @@ main() {
             usage
             ;;
     esac
-    # Names become file names, and -l doesn't list hidden files.
     case "$mode" in
-        -l|-R|-xR)
+        -l|-R|-xR|-C|-xC)
             ;;
         *)
-            case "$target" in
-                ''|-*|.*|*/*)
-                    echo "$prog: invalid service name: '$target' (names can't be empty, contain '/', or start with '-' or '.')" >&2
-                    exit 1
-                    ;;
-            esac
+            if ! valid_name "$target"; then
+                echo "$prog: invalid service name: '$target' (names can't be empty, contain '/', or start with '-' or '.')" >&2
+                exit 1
+            fi
             ;;
     esac
 
@@ -882,6 +1091,9 @@ main() {
             ;;
         -R|-xR)
             reencrypt_all
+            ;;
+        -C|-xC)
+            import_all
             ;;
         -v|-xv)
             need_key "$target"

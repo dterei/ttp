@@ -358,6 +358,36 @@ check "qr_uris expands exports among other codes" \
     "otpauth://totp/A?secret=$key"$'\n'"$uri_alice"$'\n'"$uri_bob" \
     "$(printf 'QR-Code:https://example.com\nQR-Code:otpauth://totp/A?secret=%s\nQR-Code:%s\n' "$key" "$export_two" | qr_uris)"
 
+echo "Testing the names ttp -C suggests"
+check "uri_decode of UTF-8, space and &" "Zoë & co" "$(uri_decode 'Zo%C3%AB%20%26%20co')"
+check "uri_decode leaves backslashes and a stray % alone" 'a\nbA\x' "$(uri_decode 'a\nb%41%')"
+for pair in "Big Co:big-co" "GitHub:github" "--.x-:x" "a/b:a-b" "Zoë & co:zoë-co" \
+        "it's  (work):it-s-work" "A.B+C_d:a.b+c_d" "alice@example.com:alice@example.com"; do
+    check "name_from '${pair%:*}'" "${pair##*:}" "$(name_from "${pair%:*}")"
+done
+uri_names "$uri_alice"
+check "uri_names: label" "Example:alice@example.com" "$label"
+check "uri_names: issuer" "Example" "$issuer"
+check "uri_names: account" "alice@example.com" "$account"
+uri_names "otpauth://totp/Big%20Co:%20me?secret=$key"
+check "uri_names: issuer from the label" "Big Co" "$issuer"
+check "uri_names: account without the space" "me" "$account"
+uri_names "otpauth://totp/bob?secret=$key"
+check "uri_names: no issuer" ":bob" "$issuer:$account"
+mkdir -p "$tmp/nokeys"
+issuer=GitHub account=me
+names=()
+check "suggest_name: the issuer" github "$(keydir=$tmp/nokeys suggest_name)"
+names=(github)
+check "suggest_name: issuer taken, adds the account" github-me "$(keydir=$tmp/nokeys suggest_name)"
+names=(github github-me github-2)
+check "suggest_name: then a number" github-3 "$(keydir=$tmp/nokeys suggest_name)"
+touch "$tmp/nokeys/bob.gpg"
+issuer='' account=bob names=()
+check "suggest_name: a stored key's name is taken" bob-2 "$(keydir=$tmp/nokeys suggest_name)"
+issuer='' account='...' names=()
+check "suggest_name: nothing usable in the label" key "$(keydir=$tmp/nokeys suggest_name)"
+
 ########################################################################
 # Command-line tests: run ttp as a program, with gpg wrapped to use a
 # fixed passphrase and no prompts.
@@ -652,7 +682,7 @@ check_contains "-x unknown service: message" "no key for nosuch" "$out"
 run -xv nosuch
 check "-xv unknown service: exit status" 1 "$rc"
 
-for args in "" "-c" "-x" "a b c" "-l x" "-R x" "-xR x" "--version x"; do
+for args in "" "-c" "-x" "a b c" "-l x" "-R x" "-xR x" "-C x" "-xC x" "--version x"; do
     run $args
     check "usage for '$args': exit status" 1 "$rc"
     check_contains "usage for '$args': message" "usage:" "$out"
@@ -749,6 +779,120 @@ check "-c declining every key in a pasted export: exit status" 0 "$rc"
 check_contains "-c declining every key in a pasted export: message" "Aborted." "$out"
 check "-c declining every key in a pasted export: no file" no \
     "$(test -e "$tmp/config/ttp/none.gpg" && echo yes || echo no)"
+
+# -C, with the zbarimg stand-in above and the logging gpg from the -R
+# tests, which takes the passphrase from ttp.
+mkdir -p "$tmp/ckeys"
+# cimport MODE ANSWERS...: run "ttp MODE" (-C or -xC) with $tmp/ckeys
+# as the key directory, typing ANSWERS at its prompts.
+cimport() {
+    local mode=$1
+    shift
+    printf '%s\n' "$@" > "$tmp/answers"
+    : > "$tmp/gpg-args"
+    out=$(keydir=$tmp/ckeys ttydev=$tmp/answers gpgcmd=$tmp/countbin/gpg DISPLAY=:0 main "$mode" 2>&1)
+    rc=$?
+}
+# ckey NAME: print the key imported as NAME.
+ckey() {
+    printf 'pass-imp\n' | "$real_gpg" --batch --pinentry-mode loopback -q \
+        --passphrase-fd 0 -d "$tmp/ckeys/$1.gpg" 2> /dev/null
+}
+# ckeys: list the files in $tmp/ckeys, including hidden ones.
+ckeys() {
+    local f list=''
+    for f in "$tmp/ckeys"/* "$tmp/ckeys"/.*; do
+        case "${f##*/}" in
+            .|..|'*'|'.*') ;;
+            *) list+="${list:+ }${f##*/}" ;;
+        esac
+    done
+    echo "$list"
+}
+
+: > "$tmp/screen"
+cimport -xC < /dev/null
+check "-xC with nothing pasted: exit status" 1 "$rc"
+check_contains "-xC with nothing pasted: message" "no keys found" "$out"
+cimport -xC <<< "not a URI"
+check "-xC with no URIs pasted: exit status" 1 "$rc"
+check_contains "-xC with no URIs pasted: message" "no keys found" "$out"
+
+printf 'QR-Code:%s\n' "$export_two" > "$tmp/screen"
+cimport -C n n < /dev/null
+check "-C declining every key: exit status" 0 "$rc"
+check_contains "-C declining every key: message" "Nothing to import." "$out"
+check "-C declining every key: no passphrase asked" no \
+    "$(printf '%s\n' "$out" | grep -q Passphrase && echo yes || echo no)"
+check "-C declining every key: no files" "" "$(ckeys)"
+
+cimport -C "" "" pass-a pass-b < /dev/null
+check "-C, passphrases differ: exit status" 1 "$rc"
+check_contains "-C, passphrases differ: message" "the passphrases don't match" "$out"
+check "-C, passphrases differ: no files" "" "$(ckeys)"
+
+cimport -C "" "" "" < /dev/null
+check "-C, empty passphrase: exit status" 1 "$rc"
+check_contains "-C, empty passphrase: message" "the passphrase can't be empty" "$out"
+check "-C, empty passphrase: no files" "" "$(ckeys)"
+
+touch "$tmp/noenc"
+cimport -C "" "" pass-imp pass-imp < /dev/null
+rm -f "$tmp/noenc"
+check "-C, gpg fails to encrypt: exit status" 1 "$rc"
+check_contains "-C, gpg fails to encrypt: message" "couldn't import: example, bob" "$out"
+check "-C, gpg fails to encrypt: no files" "" "$(ckeys)"
+
+# Both exports on screen, with a key called big-co already stored.  Keep
+# Big Co's key under the suggested name, carol's as example, skip Zoë's,
+# try two names for alice before settling on alice, and keep bob's.
+printf 'QR-Code:%s\nQR-Code:%s\n' "$export_mixed" "$export_two" > "$tmp/screen"
+printf 'old\n' | "$real_gpg" --batch --pinentry-mode loopback -q --passphrase old \
+    -c -o "$tmp/ckeys/big-co.gpg"
+cp "$tmp/ckeys/big-co.gpg" "$tmp/big-co.backup"
+cimport -C "" y n work/alice example alice "" pass-imp pass-imp < /dev/null
+check "-C: exit status" 0 "$rc"
+check_contains "-C: skips the HOTP key" "skipping counter: counter-based (HOTP)" "$out"
+check_contains "-C: suggests the issuer and account when the issuer is taken" \
+    "Import Big Co:sha256 user as big-co-sha256-user? (Y/n/other name)" "$out"
+check_contains "-C: suggests the issuer" "Import Example:carol as example?" "$out"
+check_contains "-C: suggests a name for a label with no issuer" "Import Zoë & co as zoë-co?" "$out"
+check_contains "-C: names taken in this import count" \
+    "Import Example:alice@example.com as example-alice@example.com?" "$out"
+check_contains "-C: rejects an invalid name" "invalid service name: 'work/alice'" "$out"
+check_contains "-C: rejects a name in use" "there's already a key called example" "$out"
+check_contains "-C: summary" "Imported big-co-sha256-user, example, alice, bob." "$out"
+check "-C: files" "alice.gpg big-co-sha256-user.gpg big-co.gpg bob.gpg example.gpg" "$(ckeys)"
+check "-C: Big Co's key" \
+    "otpauth://totp/Big%20Co:sha256%20user?secret=ONUGC43FMNZGK5BB&issuer=Big%20Co&algorithm=SHA256" \
+    "$(ckey big-co-sha256-user)"
+check "-C: carol's key" "otpauth://totp/Example:carol?secret=IV4GC3LQNRSTU6A&issuer=Example" "$(ckey example)"
+check "-C: alice's key" "$uri_alice" "$(ckey alice)"
+check "-C: bob's key" "$uri_bob" "$(ckey bob)"
+check "-C: existing key unchanged" same \
+    "$(cmp -s "$tmp/big-co.backup" "$tmp/ckeys/big-co.gpg" && echo same || echo changed)"
+packets=$("$real_gpg" --batch --pinentry-mode cancel --list-packets "$tmp/ckeys/alice.gpg" 2>&1)
+check_contains "-C: AES-256" "cipher 9," "$packets"
+check_contains "-C: SHA-512" "hash 10" "$packets"
+check_contains "-C: the most iterations" "count 65011712" "$packets"
+# shellcheck disable=SC2012
+check "-C: key files are private" "-rw-------" "$(ls -l "$tmp/ckeys/bob.gpg" | cut -c1-10)"
+check "-C: passphrase never on gpg's command line" no \
+    "$(grep -q 'pass-' "$tmp/gpg-args" && echo yes || echo no)"
+
+# Pasted URIs: an export, a plain otpauth:// URI and an invalid one,
+# ending at an empty line.
+rm -f "$tmp/ckeys"/*.gpg
+: > "$tmp/screen"
+cimport -xC "" n "" pass-imp pass-imp \
+    < <(printf '%s\n%s\n%s\n\n%s\n' "$export_two" "otpauth://totp/GitHub:me?secret=$key&issuer=GitHub" \
+        "otpauth://totp/Bad:x?secret=NOT!VALID" "otpauth://totp/After:blank?secret=$key")
+check "-xC pasted: exit status" 0 "$rc"
+check_contains "-xC pasted: asks for URIs" "Paste otpauth-migration:// or otpauth:// URIs" "$out"
+check_contains "-xC pasted: summary" "Imported example, github." "$out"
+check_contains "-xC pasted: skips an invalid key" "skipping Bad:x" "$out"
+check "-xC pasted: stops at the empty line" "example.gpg github.gpg" "$(ckeys)"
+check "-xC pasted: the plain URI's key" "otpauth://totp/GitHub:me?secret=$key&issuer=GitHub" "$(ckey github)"
 rm -f "$tmp/bin/zbarimg" "$tmp/config/ttp/scanned.gpg" "$tmp/config/ttp/typed.gpg" \
     "$tmp/config/ttp/exported.gpg" "$tmp/config/ttp/pasted.gpg"
 
