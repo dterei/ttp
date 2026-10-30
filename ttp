@@ -59,6 +59,7 @@ usage() {
     echo "       $prog -[x]C            # import all keys from a Google Authenticator export" >&2
     echo "       $prog -l               # list services setup" >&2
     echo "       $prog --version        # print ttp's version" >&2
+    echo "       $prog --completion bash|zsh  # print a shell completion script" >&2
     echo "(The -x* flags disable use of X11 and Wayland even when they are available.)" >&2
     exit 1
 }
@@ -975,6 +976,115 @@ import_all() {
     fi
 }
 
+# Print the completion script for shell $1, which lists the names in
+# the key directory, without running ttp, so tab stays fast.
+completion() {
+    local script
+    case "$1" in
+        bash)
+            IFS= read -r -d '' script <<'EOF'
+# bash completion for ttp.  In ~/.bashrc: eval "$(ttp --completion bash)"
+_ttp() {
+    local cur=${COMP_WORDS[COMP_CWORD]//\\/} arg=1 dir f w
+    local -a words=()
+    COMPREPLY=()
+    # "ttp -x ..." works like "ttp ...".
+    if test "${COMP_WORDS[1]}" = -x && test "$COMP_CWORD" -gt 1; then
+        arg=2
+    fi
+    if test "$COMP_CWORD" -eq "$arg"; then
+        case $cur in
+            -*)
+                if test "$arg" = 1; then
+                    words=(-x -c -v -r -R -C -l --version --completion)
+                else
+                    words=(-c -v -r -R -C -l)
+                fi
+                ;;
+        esac
+    elif test "$COMP_CWORD" -eq $((arg + 1)); then
+        case ${COMP_WORDS[arg]} in
+            -v|-xv|-r|-xr) ;;
+            --completion) words=(bash zsh) ;;
+            *) return ;;
+        esac
+    else
+        return
+    fi
+    if test ${#words[@]} -gt 0; then
+        for w in "${words[@]}"; do
+            case $w in
+                "$cur"*) COMPREPLY+=("$w") ;;
+            esac
+        done
+        return
+    fi
+    # Service names, quoted for the command line.
+    dir=${XDG_CONFIG_HOME-$HOME/.config}/ttp
+    for f in "$dir"/*.gpg; do
+        test -f "$f" || continue
+        w=${f##*/}
+        w=${w%.gpg}
+        case $w in
+            "$cur"*) COMPREPLY+=("$(printf '%q' "$w")") ;;
+        esac
+    done
+}
+complete -F _ttp ttp
+EOF
+            ;;
+        zsh)
+            IFS= read -r -d '' script <<'EOF'
+#compdef ttp
+# zsh completion for ttp.  In ~/.zshrc, after compinit:
+#   source <(ttp --completion zsh)
+_ttp() {
+    local dir=${XDG_CONFIG_HOME-$HOME/.config}/ttp arg=2
+    local -a names options
+    names=($dir/*.gpg(N.:t:r))
+    options=(
+        '-c:add a key for a new service'
+        '-v:show a service'"'"'s key as a QR code'
+        '-r:re-encrypt a service'"'"'s key with current settings'
+        '-R:re-encrypt all keys, or change their passphrase'
+        '-C:import all keys from a Google Authenticator export'
+        '-l:list services'
+    )
+    # "ttp -x ..." works like "ttp ...".
+    if [[ ${words[2]} == -x ]] && (( CURRENT > 2 )); then
+        arg=3
+    fi
+    if (( CURRENT == arg )); then
+        if [[ $PREFIX == -* ]]; then
+            if (( arg == 2 )); then
+                options+=(
+                    '-x:print codes and type keys, without X11 or Wayland'
+                    '--version:print ttp'"'"'s version'
+                    '--completion:print a shell completion script'
+                )
+            fi
+            _describe -t options option options
+        else
+            compadd -a names
+        fi
+    elif (( CURRENT == arg + 1 )); then
+        case ${words[arg]} in
+            -v|-xv|-r|-xr) compadd -a names ;;
+            --completion) compadd bash zsh ;;
+        esac
+    fi
+}
+compdef _ttp ttp
+EOF
+            ;;
+        *)
+            echo "$prog: no completion for '$1': use bash or zsh" >&2
+            exit 1
+            ;;
+    esac
+    printf '%s' "$script"
+}
+
 main() {
     local mode target code key secret f old name pass
 
@@ -1009,6 +1119,10 @@ main() {
         2)
             case "$1" in
                 -l|-R|-xR|-C|-xC) usage ;;
+                --completion)
+                    completion "$2"
+                    exit 0
+                    ;;
             esac
             mode=$1 target=$2
             ;;
