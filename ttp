@@ -36,6 +36,8 @@
 # at the key prompt.  Repeat for each account you want.
 
 
+# The release workflow replaces "dev" with the release's version.
+version=dev
 prog=${0##*/}
 keydir="${XDG_CONFIG_HOME-${HOME}/.config}/ttp"
 gpgcmd="gpg"
@@ -56,6 +58,7 @@ usage() {
     echo "       $prog -[x]r service    # re-encrypt service's key with current settings" >&2
     echo "       $prog -[x]R            # re-encrypt all keys with one new passphrase" >&2
     echo "       $prog -l               # list services setup" >&2
+    echo "       $prog --version        # print ttp's version" >&2
     echo "(The -x* flags disable use of X11 and Wayland even when they are available.)" >&2
     exit 1
 }
@@ -760,6 +763,10 @@ main() {
         1)
             case "$1" in
                 -l|-R|-xR) mode=$1 ;;
+                --version)
+                    echo "$prog $version"
+                    exit 0
+                    ;;
                 -*) usage ;;
                 *) mode='' target=$1 ;;
             esac

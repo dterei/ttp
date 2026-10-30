@@ -63,6 +63,7 @@ implemented in bash itself.
 * `ttp -[x]r` _service_ - re-encrypt _service_'s key with current settings
 * `ttp -[x]R` - re-encrypt all keys with current settings and one new passphrase
 * `ttp -l` - list services setup
+* `ttp --version` - print the version of `ttp`
 
 Codes are copied to the clipboard you paste from with Ctrl-V (or
 Cmd-V on macOS) when a clipboard tool is available. The `-x`, `-xc`, and

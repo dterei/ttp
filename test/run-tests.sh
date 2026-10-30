@@ -626,6 +626,12 @@ check "-xR again: k5 now opens with the new passphrase" "$key" "$(opens k5 pass-
 run -l
 check "-l: lists keys" demo "$out"
 
+run --version
+check "--version: exit status" 0 "$rc"
+check "--version: prints dev outside a release" "ttp dev" "$out"
+# The release workflow replaces this line with the release's version.
+check "--version: one line for the release workflow to set" 1 "$(grep -cx 'version=dev' "$ttp")"
+
 # The code depends on the current time, so accept the code from just
 # before or just after running ttp.
 before=$(echo "$key" | totp)
@@ -646,7 +652,7 @@ check_contains "-x unknown service: message" "no key for nosuch" "$out"
 run -xv nosuch
 check "-xv unknown service: exit status" 1 "$rc"
 
-for args in "" "-c" "-x" "a b c" "-l x" "-R x" "-xR x"; do
+for args in "" "-c" "-x" "a b c" "-l x" "-R x" "-xR x" "--version x"; do
     run $args
     check "usage for '$args': exit status" 1 "$rc"
     check_contains "usage for '$args': message" "usage:" "$out"
