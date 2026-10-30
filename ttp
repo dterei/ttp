@@ -270,7 +270,9 @@ hmac() {
 
 # Read a base32 secret or otpauth://totp/ URI from stdin and print its
 # code for Unix time $1 (default: now).  URIs may set digits, period,
-# and the algorithm: SHA1 (the default), SHA256 or SHA512.
+# and the algorithm: SHA1 (the default), SHA256 or SHA512.  If
+# warn_expiry is set, also say on stderr when the code has 5 seconds or
+# less left.
 totp() {
     local b32=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567abcdefghijklmnopqrstuvwxyz
     local ws=$' \t' line secret query param digits=6 period=30 algorithm=SHA1
@@ -373,6 +375,11 @@ totp() {
     # spans lines as the start of a here-document.
     p=$(( (hash_out[i] & 127) << 24 | hash_out[i+1] << 16 | hash_out[i+2] << 8 | hash_out[i+3] ))
     printf "%0${digits}d\n" $(( p % 10 ** digits ))
+    # A code pasted in its last seconds often arrives after it expires.
+    i=$(( period - now % period ))
+    if test -n "${warn_expiry-}" && ((i <= 5)); then
+        echo "$prog: this code expires in ${i}s" >&2
+    fi
 }
 
 # Print bytes $@ as base32, without padding.
@@ -1154,7 +1161,7 @@ main() {
     case "$mode" in
         "")
             need_key "$target"
-            code=$("$gpgcmd" "${gpgoptions[@]}" -d "$keydir/$target.gpg" | totp) || exit 1
+            code=$("$gpgcmd" "${gpgoptions[@]}" -d "$keydir/$target.gpg" | warn_expiry=1 totp) || exit 1
             if key_is_old "$keydir/$target.gpg"; then
                 echo "$prog: $target's key uses older encryption; run '$prog -r $target' to upgrade it" >&2
             fi
