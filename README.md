@@ -62,6 +62,7 @@ implemented in bash itself.
 * `ttp -[x]v` _service_ - view qrcode for _service_
 * `ttp -[x]r` _service_ - re-encrypt _service_'s key with current settings
 * `ttp -[x]R` - re-encrypt all keys with current settings and one new passphrase
+* `ttp -[x]C` - import all keys from a Google Authenticator export
 * `ttp -l` - list services setup
 * `ttp --version` - print the version of `ttp`
 
@@ -99,10 +100,15 @@ ones in QR codes. URIs may set `digits` (1 to 10), `period`, and
 
 In Google Authenticator, choose "Transfer accounts", then "Export
 accounts". The app shows one or more QR codes, each holding several
-accounts. Then, for each account you want to move, run `ttp -c`
-_service_ with the QR code on screen (this needs X11 and `zbarimg`),
-and answer `y` when `ttp` asks about that account. If you have the
-code's `otpauth-migration://` URI instead, paste it at the key prompt.
+accounts. Run `ttp -C` with the QR codes on screen (this needs X11 and
+`zbarimg`), or paste their `otpauth-migration://` URIs when asked. For
+each account, `ttp` suggests a name made from its issuer, such as
+`github`: press Enter to use it, type another name, or answer `n` to
+skip the account. It then asks for one passphrase for all the new keys.
+
+To import a single account, run `ttp -c` _service_ with the QR code on
+screen, and answer `y` when `ttp` asks about that account, or paste the
+code's URI at the key prompt.
 
 Counter-based (HOTP) accounts are skipped, and accounts using MD5 are
 rejected.
