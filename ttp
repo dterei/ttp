@@ -54,6 +54,7 @@ usage() {
     echo "       $prog -[x]c service    # record seed for new service" >&2
     echo "       $prog -[x]v service    # view qrcode for service" >&2
     echo "       $prog -[x]r service    # re-encrypt service's key with current settings" >&2
+    echo "       $prog -[x]R            # re-encrypt all keys with one new passphrase" >&2
     echo "       $prog -l               # list services setup" >&2
     echo "(The -x* flags disable use of X11 and Wayland even when they are available.)" >&2
     exit 1
@@ -618,6 +619,124 @@ need_key() {
     fi
 }
 
+# Ask for a passphrase with prompt $1 on stderr, and read it from fd 3
+# without echoing it.  The result goes in $pass.
+ask_pass() {
+    local rc
+    echo -n "$1" >&2
+    IFS= read -rs pass <&3
+    rc=$?
+    echo >&2
+    return $rc
+}
+
+# Print the key in key file $1, decrypted with passphrase $2.  printf is
+# a builtin, so the passphrase never appears in a command line.
+decrypt_with() {
+    printf '%s\n' "$2" \
+        | "$gpgcmd" "${gpgoptions[@]}" --batch --passphrase-fd 0 -d "$1" 2> /dev/null
+}
+
+# Move passphrase $1 to the front of $passes, adding it if it's new, so
+# the next key tries it first.  Each try takes a while, and the
+# passphrase that opened the last key is the best guess for the next.
+try_first() {
+    local p
+    local -a rest=()
+    for p in "${passes[@]}"; do
+        test "$p" = "$1" || rest+=("$p")
+    done
+    passes=("$1" "${rest[@]}")
+}
+
+# Re-encrypt every key with the current settings and one new passphrase.
+# Each key is tried with every passphrase that has opened a key so far,
+# so the user types each old passphrase only once, and is asked only
+# about keys none of them open.  A key that can't be re-encrypted is
+# left as it is, and named at the end.
+reencrypt_all() {
+    local f name secret pass newpass newfile opened count=0 skipped=
+    local -a files passes
+    files=()
+    for f in "$keydir"/*.gpg; do
+        test -f "$f" && files+=("$f")
+    done
+    if test ${#files[@]} -eq 0; then
+        echo "$prog: there are no keys to re-encrypt" >&2
+        exit 1
+    fi
+    umask 077
+    {
+        ask_pass "Current passphrase: " || exit 1
+        passes=("$pass")
+        ask_pass "New passphrase: " || exit 1
+        newpass=$pass
+        if test -z "$newpass"; then
+            echo "$prog: the new passphrase can't be empty" >&2
+            exit 1
+        fi
+        ask_pass "Repeat new passphrase: " || exit 1
+        if test "$pass" != "$newpass"; then
+            echo "$prog: the new passphrases don't match" >&2
+            exit 1
+        fi
+        # Keys may already use the new passphrase, if an earlier run was
+        # interrupted.  They are re-encrypted again, which does no harm.
+        passes+=("$newpass")
+        for f in "${files[@]}"; do
+            name=${f##*/}
+            name=${name%.gpg}
+            opened=
+            for pass in "${passes[@]}"; do
+                if secret=$(decrypt_with "$f" "$pass"); then
+                    opened=yes
+                    break
+                fi
+            done
+            while test -z "$opened"; do
+                ask_pass "Passphrase for $name (none so far open it; leave empty to skip it): " || exit 1
+                test -z "$pass" && break
+                if secret=$(decrypt_with "$f" "$pass"); then
+                    opened=yes
+                else
+                    echo "$prog: that passphrase doesn't open $name's key either" >&2
+                fi
+            done
+            if test -z "$opened"; then
+                skipped+="${skipped:+, }$name"
+                continue
+            fi
+            try_first "$pass"
+            # As with -r: only replace a key that decrypted to a valid one.
+            if test -z "$secret" || ! printf '%s\n' "$secret" | totp 0 > /dev/null; then
+                echo "$prog: $name's key isn't a valid key; leaving it as it is" >&2
+                skipped+="${skipped:+, }$name"
+                continue
+            fi
+            newfile="$keydir/.$name.gpg.new"
+            # shellcheck disable=SC2064
+            trap "rm -f $(printf '%q' "$newfile")" EXIT
+            rm -f "$newfile"
+            if printf '%s\n' "$secret" \
+                    | "$gpgcmd" "${gpgoptions[@]}" "${gpgencrypt[@]}" --batch \
+                        --passphrase-fd 4 -c -o "$newfile" 4< <(printf '%s\n' "$newpass") \
+                    && mv -f "$newfile" "$f"; then
+                count=$((count + 1))
+            else
+                rm -f "$newfile"
+                echo "$prog: couldn't re-encrypt $name's key; leaving it as it is" >&2
+                skipped+="${skipped:+, }$name"
+            fi
+        done
+    } 3< "$ttydev"
+    trap - EXIT
+    echo "Re-encrypted $count of ${#files[@]} keys."
+    if test -n "$skipped"; then
+        echo "$prog: these keys were left as they were: $skipped" >&2
+        exit 1
+    fi
+}
+
 main() {
     local mode target code key secret f newfile old name
 
@@ -640,12 +759,15 @@ main() {
     case $# in
         1)
             case "$1" in
-                -l) mode=-l ;;
+                -l|-R|-xR) mode=$1 ;;
                 -*) usage ;;
                 *) mode='' target=$1 ;;
             esac
             ;;
         2)
+            case "$1" in
+                -l|-R|-xR) usage ;;
+            esac
             mode=$1 target=$2
             ;;
         *)
@@ -653,14 +775,18 @@ main() {
             ;;
     esac
     # Names become file names, and -l doesn't list hidden files.
-    if test "$mode" != -l; then
-        case "$target" in
-            ''|-*|.*|*/*)
-                echo "$prog: invalid service name: '$target' (names can't be empty, contain '/', or start with '-' or '.')" >&2
-                exit 1
-                ;;
-        esac
-    fi
+    case "$mode" in
+        -l|-R|-xR)
+            ;;
+        *)
+            case "$target" in
+                ''|-*|.*|*/*)
+                    echo "$prog: invalid service name: '$target' (names can't be empty, contain '/', or start with '-' or '.')" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+    esac
 
     case $(gsettings get org.gnome.crypto.cache gpg-cache-method 2>/dev/null) in
         "'idle'"|"'timeout'"|"")
@@ -747,6 +873,9 @@ main() {
             mv -f "$newfile" "$keydir/$target.gpg" || exit 1
             echo "Re-encrypted $target's key."
             ;;
+        -R|-xR)
+            reencrypt_all
+            ;;
         -v|-xv)
             need_key "$target"
             secret=$("$gpgcmd" "${gpgoptions[@]}" -d "$keydir/$target.gpg") || exit 1
@@ -784,7 +913,7 @@ main() {
             # Report keys that need upgrading on stderr, so the list of
             # names on stdout stays easy to use in scripts.
             if test -n "$old"; then
-                echo "$prog: these keys use older encryption; upgrade each with '$prog -r service': $old" >&2
+                echo "$prog: these keys use older encryption; upgrade them all with '$prog -R', or each with '$prog -r service': $old" >&2
             fi
             ;;
         *)
