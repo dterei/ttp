@@ -73,6 +73,11 @@ Cmd-V on macOS) when a clipboard tool is available. Adding `x` to a flag
 Wayland even when they are available: codes are printed, keys are typed
 or pasted in, and QR codes are drawn in the terminal.
 
+If a code has 5 seconds or less left, `ttp` says so, since a code
+pasted that late can arrive after it has expired. Many sites accept a
+code for a little while after that, but if one is rejected, run `ttp`
+again for the next code.
+
 All your keys share one passphrase. The first key you add asks for it
 twice; after that, `ttp -c` and `ttp -C` ask once and check it opens
 your newest key, so a typo can't save a key you can't open.
